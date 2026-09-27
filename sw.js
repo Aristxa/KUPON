@@ -1,8 +1,8 @@
 // Kupon service worker: network first for our own files, cache as the offline fallback.
-const CACHE = 'kupon-v1';
+const CACHE = 'kupon-v2';
 const SHELL = [
   './', 'index.html', 'css/app.css', 'manifest.webmanifest',
-  'js/app.js', 'js/i18n.js', 'js/icons.js', 'js/qr.js', 'js/store.js',
+  'js/app.js', 'js/i18n.js', 'js/icons.js', 'js/portal.js', 'js/qr.js', 'js/store.js',
   'vendor/jsQR.js', 'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png',
 ];
 

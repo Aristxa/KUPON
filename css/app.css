@@ -265,3 +265,40 @@ fieldset.warranty { border: 1px solid var(--line); border-radius: var(--radius);
   background: var(--ink); color: var(--bg); padding: 10px 16px; border-radius: 8px; font-size: .92rem;
   max-width: calc(100% - 32px);
 }
+
+/* ---------- tax portal, items, prices, split by item ---------- */
+:root { --good: #17633f; }
+@media (prefers-color-scheme: dark) { :root { --good: #6fd7ac; } }
+.good { color: var(--good); }
+.ic.tiny.warn { color: var(--warn); }
+.ic.tiny.muted { color: var(--muted); }
+.fstate { display: flex; gap: 8px; align-items: flex-start; margin: 8px 0; font-size: .92rem; }
+.fstate .ic { margin-top: 1px; }
+.fstate.ok { color: var(--good); font-weight: 600; }
+.fstate.warn { color: var(--warn); }
+.fmissing { background: var(--warn-soft); border-radius: var(--radius); padding: 4px 12px 10px; margin: 8px 0; }
+.fmissing .fstate { color: var(--ink); }
+.fmissing .fstate .ic { color: var(--warn); }
+.spin { width: 16px; height: 16px; flex: none; margin-top: 2px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spin { animation-duration: 3s; } }
+.tbl.items tfoot td { font-weight: 600; border-top: 1px solid var(--line); border-bottom: none; }
+.meter.over span { background: var(--warn); }
+.grow { flex: 1; margin: 0; min-width: 0; }
+.tbl.budgets td { vertical-align: middle; padding-top: 4px; padding-bottom: 4px; }
+.tbl.budgets input { width: 120px; text-align: right; min-height: 38px; }
+.tbl.budgets label { color: var(--ink); font-weight: 500; font-size: .93rem; }
+.seg span { font-size: .88rem; line-height: 1.25; }
+.seg .ic { width: 16px; height: 16px; vertical-align: -3px; }
+.sitems { list-style: none; margin: 8px 0; padding: 0; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+.sitems li { padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.sitems li:last-child { border-bottom: none; }
+.row.between0 { justify-content: space-between; gap: 12px; }
+.sitems .num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.chip {
+  font: inherit; font-size: .85rem; min-height: 34px; padding: 4px 12px; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 17px; background: var(--bg); color: var(--ink-2);
+}
+.chip[aria-pressed=true] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+.chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }

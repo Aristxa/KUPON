@@ -5,21 +5,25 @@ No account; everything stays in your browser.
 
 Live: https://aristxa.github.io/KUPON/
 
-## What v1 does
+## What it does
 
-- **Scan** with the camera (`BarcodeDetector` where available, bundled jsQR otherwise), upload a photo, or paste the QR link.
-- **Log** store NIPT, date, time and total from the QR. You type a store name once per NIPT; the category is suggested from the name. Duplicates are caught by `iic`.
-- **Overview**: this month vs last month (same days, for the running month), spend per day, by category, top stores.
-- **Split the bill**: equal or custom amounts, with an Albanian message to copy or send on WhatsApp.
-- **Warranty vault**: mark a receipt as under warranty, see what expires soon, add a calendar reminder (.ics).
-- **Official check**: opens the receipt on the tax portal, which lists the items.
-- **Data**: CSV and JSON export, import (merges, skips duplicates), delete all.
-- **PWA**: installable, works offline. Albanian UI with an English toggle.
+- **Scan** with the camera (`BarcodeDetector` where available, bundled jsQR otherwise), upload a photo, or paste the QR link. Batch mode: save and scan the next one.
+- **Declared check**: every receipt is looked up on the tax authority's public check portal. You see whether it was declared, and receipts that aren't there yet are checked again (tills may report up to 48 hours late).
+- **Items, store name and VAT** come from the same lookup, so a scan is logged with no typing.
+- **Overview**: this month against the same days of last month, VAT paid, spend per day, by category and by store, and monthly budgets.
+- **Price memory**: every product you buy gets a price history across stores, showing where it is cheapest and how its price has changed.
+- **Split the bill**: equally, by custom amounts, or by item (tap who had what). You get an Albanian message to copy or send on WhatsApp.
+- **Warranty vault**: mark a receipt as under warranty, see what expires soon, and add a calendar reminder (.ics).
+- **Manual entry** for spending without a fiscal receipt.
+- **Data**: CSV and JSON export, import (merges and skips duplicates), delete all.
+- **PWA**: installable and works offline. Albanian UI with an English toggle.
 
-## Limits
+## How the portal lookup works
 
-The QR code has the store's NIPT, the date/time and the total, not the items or the store name.
-The tax portal's API rejects requests from other sites (CORS 403), so items stay behind the "Open official receipt" link for now.
+The QR code holds the NIPT, date/time and total. The rest comes from `POST /invoice-check/api/verifyInvoice`
+(form fields `iic`, `dateTimeCreated`, `tin`), the endpoint the portal's own page uses. A plain form POST needs no CORS preflight,
+and the endpoint answers with `Access-Control-Allow-Origin: *`, so the browser reads it directly, without a server or proxy.
+Kupon sends one request per receipt you scan, plus occasional rechecks for receipts that aren't there yet. You can turn it off under *Data*.
 
 ## Run locally
 
@@ -33,6 +37,7 @@ The camera needs HTTPS or `localhost`. Add `?nosw` to the URL to skip the servic
 
 ## Files
 
+- `js/portal.js`: tax portal lookup and response parsing
 - `js/qr.js`: QR parsing (params live after `#/verify?`) and camera/photo decoding
 - `js/store.js`: localStorage data, category hints, sample-data mode
 - `js/app.js`: views, split, warranty, import/export
