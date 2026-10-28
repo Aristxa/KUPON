@@ -1,9 +1,9 @@
 // Kupon service worker: network first for our own files, cache as the offline fallback.
-const CACHE = 'kupon-v2';
+const CACHE = 'kupon-v4';
 const SHELL = [
   './', 'index.html', 'css/app.css', 'manifest.webmanifest',
-  'js/app.js', 'js/i18n.js', 'js/icons.js', 'js/portal.js', 'js/qr.js', 'js/store.js',
-  'vendor/jsQR.js', 'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png',
+  'js/app.js', 'js/i18n.js', 'js/icons.js', 'js/portal.js', 'js/qr.js', 'js/store.js', 'js/ocr.js', 'js/sync.js', 'js/config.js',
+  'vendor/jsQR.js', 'fonts/archivo-normal.woff2', 'fonts/newsreader-normal.woff2', 'fonts/newsreader-italic.woff2', 'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png',
 ];
 
 self.addEventListener('install', e => {
