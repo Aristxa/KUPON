@@ -1,7 +1,9 @@
 // UI strings. Albanian first, English second.
 
+// 'release' is a marker: app.js checks it, so a new app.js never runs with an old copy of this file.
 const STR = {
   sq: {
+    'release': '6',
     'nav.home': 'Pasqyra', 'nav.scan': 'Skano', 'nav.list': 'Kuponat', 'nav.warranty': 'Garancitë', 'nav.settings': 'Të dhënat',
     'lang.switch': 'EN', 'lang.label': 'Switch to English',
 

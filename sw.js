@@ -1,5 +1,5 @@
 // Kupon service worker: network first for our own files, cache as the offline fallback.
-const CACHE = 'kupon-v5';
+const CACHE = 'kupon-v6';
 const SHELL = [
   './', 'index.html', 'css/app.css', 'manifest.webmanifest',
   'js/app.js', 'js/i18n.js', 'js/icons.js', 'js/portal.js', 'js/qr.js', 'js/store.js', 'js/ocr.js', 'js/sync.js', 'js/config.js',
@@ -7,7 +7,8 @@ const SHELL = [
 ];
 
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  // 'reload' skips the browser's HTTP cache, so a new version never stores yesterday's files.
+  e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL.map(u => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', e => {
@@ -22,7 +23,9 @@ self.addEventListener('fetch', e => {
   const url = new URL(req.url);
   if (req.method !== 'GET' || url.origin !== location.origin) return;
   e.respondWith(
-    fetch(req).then(res => {
+    // 'no-cache' asks the server every time (a cheap 304 when nothing changed), so files from
+    // two different releases are never mixed.
+    fetch(req, { cache: 'no-cache' }).then(res => {
       if (res.ok) { const copy = res.clone(); caches.open(CACHE).then(c => c.put(req, copy)); }
       return res;
     }).catch(() =>

@@ -1872,6 +1872,13 @@ $$('[data-icon]').forEach(el => { el.insertAdjacentHTML('afterbegin', icon(el.da
 
 setLang(db.pref('lang') || 'sq');
 applyStatic();
+// Right after an update the browser may still hold an older i18n.js from before it. Fetch the
+// app's files fresh once and reload, rather than show text keys. ('release' must match i18n.js.)
+if (t('release') !== '6' && !sessionStorage.getItem('kupon.refreshed')) {
+  sessionStorage.setItem('kupon.refreshed', '1');
+  Promise.all(['js/i18n.js', 'js/app.js', 'js/store.js', 'js/sync.js', 'js/ocr.js', 'js/config.js', 'js/portal.js', 'js/qr.js', 'js/icons.js', 'css/app.css']
+    .map(u => fetch(u, { cache: 'reload' }).catch(() => {}))).finally(() => location.reload());
+}
 applyRecurring();
 startAutoSync(r => { if (r && r.ok && !sheet().open) render(); });
 checkApi();
