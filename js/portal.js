@@ -8,6 +8,8 @@
 // An empty body means the portal has no record of the receipt (yet: tills that were offline
 // can send receipts up to 48 hours late).
 
+import { API_BASE } from './config.js';
+
 const ENDPOINT = 'https://efiskalizimi-app.tatime.gov.al/invoice-check/api/verifyInvoice';
 
 const num = v => {
@@ -40,13 +42,15 @@ export async function lookupReceipt(r, { timeout = 15000 } = {}) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeout);
   try {
-    const res = await fetch(ENDPOINT, {
-      method: 'POST',
-      body: new URLSearchParams({ iic: r.iic, dateTimeCreated: r.crtd, tin: r.tin }),
-      signal: ctrl.signal,
-      credentials: 'omit',
-      referrerPolicy: 'no-referrer',
-    });
+    const body = () => new URLSearchParams({ iic: r.iic, dateTimeCreated: r.crtd, tin: r.tin });
+    let res;
+    try {
+      res = await fetch(ENDPOINT, { method: 'POST', body: body(), signal: ctrl.signal, credentials: 'omit', referrerPolicy: 'no-referrer' });
+    } catch (e) {
+      // The browser couldn't reach the portal (blocked, not offline): ask through Kupon's server instead.
+      if (e.name === 'AbortError' || !API_BASE) throw e;
+      res = await fetch(API_BASE + '/v1/verify', { method: 'POST', body: body(), signal: ctrl.signal, credentials: 'omit' });
+    }
     if (!res.ok) return { status: 'error', reason: 'http_' + res.status };
     const text = (await res.text()).trim();
     if (!text || text === 'null') return { status: 'notfound' };

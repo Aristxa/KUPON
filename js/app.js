@@ -3,6 +3,9 @@ import { t, tsq, setLang, getLang, applyStatic } from './i18n.js';
 import { db, CATEGORIES, suggestCategory } from './store.js';
 import { parseReceiptQR, decodeImageFile, CameraScanner } from './qr.js';
 import { lookupReceipt, tidySellerName } from './portal.js';
+import { readReceiptPhoto } from './ocr.js';
+import { syncSupported, syncNow, enable as enableSync, disable as disableSync, validCode, startAutoSync } from './sync.js';
+import { API_BASE } from './config.js';
 
 const $ = (s, root = document) => root.querySelector(s);
 const $$ = (s, root = document) => [...root.querySelectorAll(s)];
@@ -100,7 +103,7 @@ function fiscalState(r) {
 function applyLookup(iic, res) {
   const r = db.find(iic);
   if (!r) return;
-  const patch = { fiscal: { status: res.status, at: new Date().toISOString() } };
+  const patch = { fiscal: { status: res.status, at: new Date().toISOString(), ...(res.reason ? { reason: res.reason } : {}) } };
   if (res.status === 'ok') {
     const d = res.data;
     Object.assign(patch, { seller: d.seller, items: d.items, vat: d.vat, net: d.net, portalTotal: d.total, payment: d.payment });
@@ -169,10 +172,16 @@ function renderHome() {
   if (!all.length) {
     el.innerHTML = `
       <div class="empty">
-        <h1>${esc(t('home.empty.title'))}</h1>
-        <p>${esc(t('home.empty.body'))}</p>
-        <p><a class="btn primary" href="#scan">${icon('qr_code')}<span>${esc(t('home.empty.cta'))}</span></a></p>
-        <p><button class="btn link" type="button" data-act="demo">${esc(t('demo.start'))}</button></p>
+        <p class="kicker">${esc(t('home.empty.kicker'))}</p>
+        <h1>${esc(t('home.empty.h1a'))} <em>${esc(t('home.empty.h1b'))}</em></h1>
+        <p class="serif">${esc(t('home.empty.lead'))}</p>
+        <a class="btn cobalt big" href="#scan">${icon('qr_code')}<span>${esc(t('home.empty.cta'))}</span></a>
+        <p class="center"><button class="btn link" type="button" data-act="demo">${esc(t('demo.start'))}</button></p>
+        <ul class="facts">
+          <li><b>01</b><span>${esc(t('home.empty.f1'))}</span></li>
+          <li><b>02</b><span>${esc(t('home.empty.f2'))}</span></li>
+          <li><b>03</b><span>${esc(t('home.empty.f3'))}</span></li>
+        </ul>
       </div>`;
     return;
   }
@@ -190,13 +199,9 @@ function renderHome() {
   }
   const prevTotal = sum(prev);
 
-  let compare;
-  if (!prevTotal) compare = t('home.vs.none', { month: monthName(prevKey, 'monthIn') });
-  else {
-    const pct = Math.round(((total - prevTotal) / prevTotal) * 100);
-    compare = t('home.vs', { pct: pctStr(pct), month: monthName(prevKey, 'monthIn'), amount: fmtL(prevTotal) });
-    if (isCurrent) compare += ' ' + t('home.samePeriod');
-  }
+  const prevMonth = monthName(prevKey, 'monthIn');
+  const vsPct = prevTotal ? pctStr(Math.round(((total - prevTotal) / prevTotal) * 100)) : '–';
+  const vsSub = prevTotal ? t('home.k.vsSub', { amount: fmtL(prevTotal), month: prevMonth }) : t('home.vs.none', { month: prevMonth });
 
   // What the tax portal told us about this month's receipts
   const qr = rs.filter(r => !isManual(r));
@@ -208,21 +213,36 @@ function renderHome() {
   const maxKey = [monthKey(today), ...all.map(r => monthKey(r.day))].sort().pop();
 
   const soon = warrantyRows().filter(w => w.left >= 0 && w.left <= 30).length;
-  const missing = all.filter(r => fiscalState(r) === 'missing').length;
+  const missing = qr.filter(r => fiscalState(r) === 'missing').length;
 
   el.innerHTML = `
+    ${nudges()}
     ${soon ? `<a class="notice" href="#warranty">${icon('shield_checkmark')}<span>${esc(soon === 1 ? t('home.warrantySoon1') : t('home.warrantySoon', { n: soon }))}</span></a>` : ''}
     <div class="monthbar">
       <button class="iconbtn" type="button" data-act="month" data-d="-1" aria-label="${esc(t('home.prev'))}" ${viewMonth <= minKey ? 'disabled' : ''}>${icon('chevron_left')}</button>
       <h1>${esc(monthLabel(viewMonth))}</h1>
       <button class="iconbtn" type="button" data-act="month" data-d="1" aria-label="${esc(t('home.next'))}" ${viewMonth >= maxKey ? 'disabled' : ''}>${icon('chevron_right')}</button>
     </div>
-    <p class="hero"><span class="hero-num">${fmtL(total)}</span></p>
-    <p class="sub">${esc(t('home.total', { month: monthName(viewMonth, 'monthIn') }))}${isCurrent ? ' ' + esc(t('home.upto', { day: fmtDay(today).slice(0, 5) })) : ''} · ${esc(rs.length === 1 ? t('home.count1') : t('home.count', { n: rs.length }))}</p>
-    <p class="sub">${esc(compare)}</p>
-    ${withVat.length ? `<p class="sub">${esc(t('home.vat', { amount: fmtL(Math.round(vat)) }))} <span class="muted">(${esc(t('home.vat.cov', { n: withVat.length, m: qr.length }))})</span></p>` : ''}
-    ${qr.length && (declared || missing) ? `<p class="sub">${icon('checkmark_circle', 'tiny')} ${esc(t('home.checked', { n: declared, m: qr.length }))}</p>` : ''}
+    <div class="total">
+      <p class="kicker">${esc(t('home.total', { month: monthName(viewMonth, 'monthIn') }))}${isCurrent ? ' ' + esc(t('home.upto', { day: fmtDay(today).slice(0, 5) })) : ''}</p>
+      <p class="hero-num">${bigL(total)}</p>
+      ${rs.length ? `<button class="btn small share-btn" type="button" data-act="share">${icon('share')}<span>${esc(t('share.btn'))}</span></button>` : ''}
+    </div>
+    <dl class="tally">
+      <div><dt>${esc(t('home.k.receipts'))}</dt><dd>${rs.length}</dd></div>
+      <div><dt>${esc(t('home.k.vs'))}</dt><dd>${esc(vsPct)}<small>${esc(vsSub)}</small></dd></div>
+      <div><dt>${esc(t('home.k.vat'))}</dt><dd>${withVat.length ? esc(fmtL(Math.round(vat))) : '–'}${withVat.length < qr.length ? `<small>${esc(t('home.k.vatSub', { n: withVat.length, m: qr.length }))}</small>` : ''}</dd></div>
+    </dl>
+    ${qr.length && (declared || missing) ? `
+      <a class="declared${missing ? ' has-missing' : ''}" href="#list">
+        <span class="n">${declared}<span>/${qr.length}</span></span>
+        <span class="t">${esc(t('home.declared'))}${missing ? `<br>${esc(t('home.declared.missing', { n: missing }))}` : ''}</span>
+      </a>` : ''}
+    ${isCurrent ? limitSection(total, today) : ''}
     ${rs.length ? `
+      ${insightsSection(rs, prev)}
+      ${apiUp && db.pref('coach') && isCurrent ? `<button class="btn coach-btn" type="button" data-act="coach">${icon('people')}<span><b>${esc(t('ai.title'))}</b><small>${esc(t('ai.cta'))}</small></span></button>` : ''}
+      ${cheaperSection()}
       ${budgetSection(rs)}
       <section>
         <h2>${esc(t('home.daily'))}</h2>
@@ -237,7 +257,256 @@ function renderHome() {
         ${storeTable(rs)}
       </section>` : `<p class="muted pad">${esc(t('home.noMonth'))}</p>`}
   `;
-  if (rs.length) drawDaily($('#daily-chart'), rs, viewMonth, isCurrent ? +today.slice(8, 10) : daysIn(viewMonth));
+  if (rs.length) drawDaily($('#daily-chart'), rs, viewMonth, isCurrent ? +today.slice(8, 10) : daysIn(viewMonth), isCurrent ? +today.slice(8, 10) : 0);
+}
+
+// ---------- monthly limit ----------
+function limitSection(total, today) {
+  const limit = db.pref('limit');
+  if (!(limit > 0)) return db.demo ? '' : `<p><button class="btn link" type="button" data-act="limit">${esc(t('lim.set'))}</button></p>`;
+  const key = monthKey(today);
+  const day = +today.slice(8, 10);
+  const daysLeft = daysIn(key) - day + 1;
+  const left = limit - total, over = left < 0;
+  return `<section class="limit${over ? ' over' : ''}">
+    <div class="limit-head"><h2>${esc(t('lim.title'))}</h2><button class="btn link small" type="button" data-act="limit">${esc(t('lim.edit'))}</button></div>
+    <div class="limit-bar" role="img" aria-label="${esc(fmtL(total) + ' ' + t('lim.of', { limit: fmtL(limit) }))}">
+      <span style="width:${Math.min(100, (total / limit) * 100).toFixed(1)}%"></span>
+      <i style="left:${((day / daysIn(key)) * 100).toFixed(1)}%"></i>
+    </div>
+    <p class="limit-nums"><b>${fmtL(total)}</b> <span class="muted">${esc(t('lim.of', { limit: fmtL(limit) }))}</span></p>
+    <p class="small">${esc(over ? t('lim.over', { amount: fmtL(-left) }) : t('lim.left', { left: fmtL(left), perDay: fmtL(Math.floor(left / daysLeft)) }))}</p>
+  </section>`;
+}
+
+function openLimit() {
+  const cur = db.pref('limit');
+  openSheet(`
+    <h2>${esc(t('lim.title'))}</h2>
+    <form id="lim-form" class="stack">
+      <label for="lim-v">${esc(t('lim.label'))}</label>
+      <input id="lim-v" type="number" inputmode="numeric" min="0" step="1000" value="${cur > 0 ? cur : ''}" placeholder="60000">
+      <p class="muted small">${esc(t('lim.hint'))}</p>
+      <div class="row between0 wrap">
+        ${cur > 0 ? `<button class="btn danger" type="button" id="lim-off">${esc(t('lim.remove'))}</button>` : '<span></span>'}
+        <button class="btn primary" type="submit">${esc(t('lim.save'))}</button>
+      </div>
+    </form>`, () => {
+    $('#lim-form').addEventListener('submit', e => {
+      e.preventDefault();
+      const v = Math.round(Number($('#lim-v').value));
+      db.setPref('limit', v > 0 ? v : null);
+      closeSheet();
+      toast(t('toast.saved'));
+    });
+    const off = $('#lim-off');
+    if (off) off.addEventListener('click', () => { db.setPref('limit', null); closeSheet(); });
+  });
+}
+
+// ---------- what stands out this month (all computed here, on the phone) ----------
+function insightsSection(rs, prev) {
+  const out = [];
+  const byCat = list => { const m = {}; for (const r of list) m[catOf(r)] = (m[catOf(r)] || 0) + r.total; return m; };
+  // The category that moved most against last month (the same days, for the running month).
+  const now = byCat(rs), before = byCat(prev);
+  let best = null;
+  for (const c of new Set([...Object.keys(now), ...Object.keys(before)])) {
+    const a = now[c] || 0, b = before[c] || 0;
+    if (b < 1000 || Math.max(a, b) < 2000) continue;
+    const pct = Math.round(((a - b) / b) * 100);
+    if (Math.abs(pct) >= 10 && (!best || Math.abs(pct) > Math.abs(best.pct))) best = { c, pct };
+  }
+  if (best) out.push({ big: pctStr(best.pct), text: t('ins.cat', { cat: t('cat.' + best.c) }), cls: best.pct > 0 ? 'warn' : 'good', cat: best.c });
+  // Cafés and restaurants.
+  const cafe = rs.filter(r => catOf(r) === 'cafe');
+  if (cafe.length >= 2 && !(best && best.c === 'cafe')) out.push({ big: String(cafe.length), text: t('ins.cafe', { amount: fmtL(sum(cafe)) }), cat: 'cafe' });
+  // The biggest price rise among things bought this month.
+  const key = monthKey(rs[0].day);
+  let rise = null;
+  for (const p of priceIndex()) {
+    const ins = p.buys.filter(b => monthKey(b.day) === key);
+    if (!ins.length) continue;
+    const last = ins[ins.length - 1];
+    const earlier = p.buys.filter(b => (b.day + b.time) < (last.day + last.time) && b.price !== last.price).pop();
+    if (!earlier || last.price <= earlier.price) continue;
+    const pct = Math.round(((last.price - earlier.price) / earlier.price) * 100);
+    if (pct >= 3 && (!rise || pct > rise.pct)) rise = { pct, p, from: earlier.price, to: last.price };
+  }
+  if (rise) out.push({ big: pctStr(rise.pct), text: t('ins.price', { name: rise.p.name, from: fmtL(rise.from), to: fmtL(rise.to) }), cls: 'warn', product: rise.p.key });
+  // The biggest receipt.
+  if (rs.length >= 3) {
+    const big = rs.reduce((m, r) => (r.total > m.total ? r : m));
+    out.push({ big: fmtL(big.total), text: t('ins.big', { store: storeLabel(big), date: fmtDay(big.day).slice(0, 5) }), open: big.iic });
+  }
+  // Weekends.
+  const tot = sum(rs);
+  if (rs.length >= 6 && tot > 0) {
+    const weekend = r => { const [y, m, d] = r.day.split('-').map(Number); const w = new Date(y, m - 1, d).getDay(); return w === 0 || w === 6; };
+    const share = Math.round((sum(rs.filter(weekend)) / tot) * 100);
+    if (share >= 35) out.push({ big: share + '%', text: t('ins.weekend') });
+  }
+  if (!out.length) return '';
+  return `<section>
+    <h2>${esc(t('ins.title'))}</h2>
+    <ul class="insights">${out.slice(0, 4).map(i => {
+      const attr = i.product ? ` data-product="${esc(i.product)}"` : i.open ? ` data-open="${esc(i.open)}"` : i.cat ? ` data-cat="${i.cat}"` : '';
+      const inner = `<b class="${i.cls || ''}">${esc(i.big)}</b><span>${esc(i.text)}</span>`;
+      return `<li>${attr ? `<button type="button"${attr}>${inner}</button>` : `<div>${inner}</div>`}</li>`;
+    }).join('')}</ul>
+  </section>`;
+}
+
+// ---------- gentle prompts: backup and install ----------
+const since = iso => (iso ? (Date.now() - Date.parse(iso)) / 86400000 : Infinity);
+function nudges() {
+  if (db.demo) return '';
+  const all = db.receipts;
+  const oldest = all.reduce((m, r) => (r.addedAt && r.addedAt < m ? r.addedAt : m), new Date().toISOString());
+  if (all.length >= 10 && since(db.pref('lastExport')) > 30 && since(oldest) > 14 && since(db.pref('backupLater')) > 14) {
+    return `<div class="nudge">${icon('arrow_download')}<div><p>${esc(t('bk.text'))}</p>
+      <div class="row wrap"><button class="btn small primary" type="button" data-act="json">${esc(t('bk.save'))}</button>
+      <button class="btn small link" type="button" data-act="later" data-k="backupLater">${esc(t('bk.later'))}</button></div></div></div>`;
+  }
+  const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
+  const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  if (!standalone && all.length >= 3 && (installEvt || ios) && since(db.pref('installLater')) > 30) {
+    return `<div class="nudge">${icon('add')}<div><p>${esc(t('in.text'))}</p>
+      ${installEvt ? '' : `<p class="muted small">${esc(t('in.ios'))}</p>`}
+      <div class="row wrap">${installEvt ? `<button class="btn small primary" type="button" data-act="install">${esc(t('in.btn'))}</button>` : ''}
+      <button class="btn small link" type="button" data-act="later" data-k="installLater">${esc(t('in.later'))}</button></div></div></div>`;
+  }
+  return '';
+}
+
+// Products you last bought somewhere dearer than another store you also buy them at.
+function cheaperSection() {
+  const picks = priceIndex()
+    .filter(p => p.cheapest && p.cheapest.skey !== p.last.skey && p.cheapest.price < p.last.price)
+    .sort((a, b) => (b.last.price - b.cheapest.price) - (a.last.price - a.cheapest.price))
+    .slice(0, 3);
+  if (!picks.length) return '';
+  return `<section>
+    <h2>${esc(t('home.cheaper'))}</h2>
+    <ul class="rlist">${picks.map(p => `
+      <li><button type="button" data-product="${esc(p.key)}">
+        <span class="rmain"><span class="rname">${esc(p.name)}</span>
+        <span class="muted small">${esc(t('home.cheaper.line', { price: fmtL(p.cheapest.price), store: p.cheapest.store, paid: fmtL(p.last.price), last: p.last.store }))}</span></span>
+        <span class="ramt good">−${fmtL(p.last.price - p.cheapest.price)}</span>
+      </button></li>`).join('')}
+    </ul>
+    <p><button class="btn link" type="button" data-act="prices">${esc(t('home.cheaper.all'))}</button></p>
+  </section>`;
+}
+
+// ---------- the month as a story image (1080 × 1920) ----------
+async function monthImage(key) {
+  const rs = monthReceipts(key);
+  const total = sum(rs);
+  const today = todayISO();
+  const isCurrent = key === monthKey(today);
+  const qr = rs.filter(r => !isManual(r));
+  const declared = qr.filter(r => fiscalState(r) === 'ok').length;
+  const by = {};
+  for (const r of rs) by[catOf(r)] = (by[catOf(r)] || 0) + r.total;
+  const [topCat, topV] = Object.entries(by).sort((a, b) => b[1] - a[1])[0] || ['other', 0];
+
+  const W = 1080, H = 1920, M = 90;
+  // Always the light paper look, whatever the phone's theme: it's a printed thing.
+  const PAPER = '#eceae4', INK = '#121211', MUTED = '#6e6c65', LINE = '#cfccc3', COBALT = '#2433ff';
+  await Promise.all(['800 100px Archivo', '600 100px Archivo', '400 100px Newsreader'].map(f => document.fonts.load(f).catch(() => {})));
+
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const x = c.getContext('2d');
+  const cond = (weight, size) => { x.font = `${weight} ${size}px Archivo`; if ('fontStretch' in x) x.fontStretch = 'extra-condensed'; };
+  const plain = (weight, size) => { x.font = `${weight} ${size}px Archivo`; if ('fontStretch' in x) x.fontStretch = 'normal'; };
+  const track = px => { if ('letterSpacing' in x) x.letterSpacing = px + 'px'; };
+  const rule = (y, color = INK, w = 2) => { x.fillStyle = color; x.fillRect(M, y, W - 2 * M, w); };
+
+  x.fillStyle = PAPER; x.fillRect(0, 0, W, H);
+  x.textBaseline = 'alphabetic';
+
+  // label row
+  plain(700, 30); track(5); x.fillStyle = MUTED;
+  x.fillText('KUPON', M, 150);
+  x.textAlign = 'right'; x.fillText('NOVARIS LABS', W - M, 150); x.textAlign = 'left';
+  rule(186);
+
+  // headline: "TETORI IM" / the year in cobalt
+  track(0); cond(800, 190); x.fillStyle = INK;
+  x.fillText(t('share.title', { month: t('monthDef')[+key.slice(5, 7) - 1] }).toUpperCase(), M - 6, 390);
+  x.fillStyle = COBALT; x.fillText(key.slice(0, 4), M - 6, 560);
+
+  // the total, as big as fits
+  const amount = fmtL(total).slice(0, -2);
+  let size = 330;
+  cond(800, size);
+  while (x.measureText(amount).width > W - 2 * M - 120 && size > 120) { size -= 10; cond(800, size); }
+  x.fillStyle = INK;
+  x.fillText(amount, M - 8, 930);
+  const aw = x.measureText(amount).width;
+  cond(800, Math.round(size * 0.4)); x.fillText('L', M + aw + 10, 930);
+  plain(500, 38); x.fillStyle = MUTED;
+  x.fillText(t('share.spent') + (isCurrent ? ' ' + t('share.upto', { day: fmtDay(today).slice(0, 5) }) : ''), M, 1000);
+
+  // three ruled rows, like the bottom of a receipt
+  const rows = [
+    [t('share.receipts'), String(rs.length)],
+    [t('share.declared'), qr.length ? `${declared}/${qr.length}` : '–'],
+    [t('share.top'), `${t('cat.' + topCat)} ${total ? Math.round((topV / total) * 100) : 0}%`],
+  ];
+  let y = 1090;
+  rule(y);
+  for (const [k, v] of rows) {
+    plain(600, 40); x.fillStyle = INK; x.textAlign = 'left'; x.fillText(k, M, y + 82);
+    cond(800, 64); x.textAlign = 'right'; x.fillText(v, W - M, y + 86); x.textAlign = 'left';
+    y += 128; rule(y, LINE, 2);
+  }
+
+  // the stamp
+  if (qr.length && declared) {
+    const word = t('stamp.ok').toUpperCase();
+    cond(900, 92); track(4);
+    const half = Math.ceil(x.measureText(word).width / 2) + 36;
+    x.save();
+    x.translate(W - M - half - 20, 1580); x.rotate(-9 * Math.PI / 180);
+    x.strokeStyle = COBALT; x.fillStyle = COBALT;
+    x.lineWidth = 7; x.strokeRect(-half, -78, half * 2, 156);
+    x.lineWidth = 2.5; x.strokeRect(-half - 12, -90, half * 2 + 24, 180);
+    x.textAlign = 'center';
+    x.fillText(word, 0, 22);
+    plain(800, 24); track(6); x.fillText(t('stamp.sub').toUpperCase(), 0, 60);
+    x.restore(); track(0); x.textAlign = 'left';
+  }
+
+  // sign-off
+  rule(H - 230);
+  x.font = 'italic 400 44px Newsreader'; if ('fontStretch' in x) x.fontStretch = 'normal';
+  x.fillStyle = MUTED; x.fillText(t('share.foot'), M, H - 150);
+  cond(800, 64); x.fillStyle = INK; x.fillText('KUPON.NOVARIS.AL', M, H - 80);
+
+  return new Promise(res => c.toBlob(res, 'image/png'));
+}
+
+async function shareMonth(btn) {
+  btn.disabled = true;
+  try {
+    const blob = await monthImage(viewMonth);
+    if (!blob) throw new Error('no image');
+    const name = `kupon-${viewMonth}.png`;
+    const file = new File([blob], name, { type: 'image/png' });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try { await navigator.share({ files: [file] }); } catch (err) { if (err.name !== 'AbortError') throw err; }
+    } else {
+      download(name, blob, 'image/png');
+      toast(t('share.saved'));
+    }
+  } catch (err) {
+    toast(t('share.fail'));
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 function budgetSection(rs) {
@@ -263,29 +532,27 @@ function categoryTable(rs, total) {
   for (const r of rs) by[catOf(r)] = (by[catOf(r)] || 0) + r.total;
   const rows = Object.entries(by).sort((a, b) => b[1] - a[1]);
   const max = rows[0][1] || 1;
-  return `<table class="tbl">
-    <thead><tr><th>${esc(t('th.category'))}</th><th class="num">${esc(t('th.amount'))}</th><th class="num">${esc(t('th.share'))}</th></tr></thead>
-    <tbody>${rows.map(([c, v]) => `
-      <tr><td>${esc(t('cat.' + c))}<span class="meter"><span style="width:${Math.max(2, (v / max) * 100).toFixed(1)}%"></span></span></td>
-      <td class="num">${fmtL(v)}</td><td class="num muted">${total ? Math.round((v / total) * 100) : 0}%</td></tr>`).join('')}
-    </tbody></table>`;
+  return `<ul class="rows">${rows.map(([c, v]) => `
+    <li><button type="button" class="rowbtn" data-cat="${c}"><span class="rk">${total ? Math.round((v / total) * 100) : 0}%</span><span class="rl">${esc(t('cat.' + c))}</span><span class="rv">${fmtL(v)}</span>
+      <span class="meter"><span style="width:${Math.max(2, (v / max) * 100).toFixed(1)}%"></span></span></button></li>`).join('')}
+    </ul>`;
 }
 
 function storeTable(rs) {
   const by = {};
   for (const r of rs) {
     const k = storeKey(r);
-    const s = by[k] || (by[k] = { label: storeLabel(r), tin: r.tin, n: 0, v: 0 });
+    const s = by[k] || (by[k] = { key: k, label: storeLabel(r), tin: r.tin, n: 0, v: 0 });
     s.n++; s.v += r.total;
   }
   const rows = Object.values(by).sort((a, b) => b.v - a.v).slice(0, 5);
-  return `<table class="tbl">
-    <thead><tr><th>${esc(t('th.store'))}</th><th class="num">${esc(t('th.visits'))}</th><th class="num">${esc(t('th.amount'))}</th></tr></thead>
-    <tbody>${rows.map(s => `
-      <tr><td>${esc(s.label)}${s.tin ? `<span class="muted small block">${esc(s.tin)}</span>` : ''}</td>
-      <td class="num">${s.n}</td><td class="num">${fmtL(s.v)}</td></tr>`).join('')}
-    </tbody></table>`;
+  return `<ul class="rows">${rows.map((s, i) => `
+    <li><button type="button" class="rowbtn" data-store="${esc(s.key)}"><span class="rk">${pad(i + 1)}</span><span class="rl">${esc(s.label)}</span>
+      <span class="rv"><small>${esc(s.n === 1 ? t('home.count1') : t('home.count', { n: s.n }))}</small> ${fmtL(s.v)}</span></button></li>`).join('')}
+    </ul>`;
 }
+// The big total: the amount in display type, "L" set smaller.
+const bigL = n => esc(fmtL(n).slice(0, -2)) + '<span class="cur">L</span>';
 
 function niceMax(v) {
   if (v <= 0) return 1000;
@@ -295,7 +562,7 @@ function niceMax(v) {
 }
 const shortL = v => (v >= 1000 ? (v / 1000).toLocaleString(getLang() === 'sq' ? 'sq-AL' : 'en-GB', { maximumFractionDigits: 1 }) + 'k' : String(v));
 
-function drawDaily(host, rs, key, lastDay) {
+function drawDaily(host, rs, key, lastDay, todayDay = 0) {
   const n = daysIn(key);
   const days = Array.from({ length: n }, () => ({ v: 0, c: 0 }));
   for (const r of rs) { const d = +r.day.slice(8, 10) - 1; days[d].v += r.total; days[d].c++; }
@@ -310,8 +577,8 @@ function drawDaily(host, rs, key, lastDay) {
   days.forEach((d, i) => {
     const x = padL + i * cw + (cw - bw) / 2;
     if (d.v > 0) {
-      const top = y(d.v), h = Math.max(2, base - top), r = Math.min(4, bw / 2, h);
-      bars += `<path d="M${x},${base}V${base - h + r}q0,-${r} ${r},-${r}h${bw - 2 * r}q${r},0 ${r},${r}V${base}z" class="bar"/>`;
+      const h = Math.max(2, base - y(d.v));
+      bars += `<rect x="${x}" y="${base - h}" width="${bw}" height="${h}" class="bar${i + 1 === todayDay ? ' today' : ''}"/>`;
     }
     hits += `<rect x="${padL + i * cw}" y="${padT}" width="${cw}" height="${base - padT}" class="hit" data-i="${i}"/>`;
     const dn = i + 1;
@@ -358,11 +625,14 @@ function renderScan() {
     </div>
     <p class="muted center small" id="scan-hint">${esc(t('scan.hint'))}</p>
     <p class="msg" id="scan-msg" role="status" aria-live="polite"></p>
-    <div class="row gap wrap">
+    <div class="scan-alt">
+      <label class="btn" for="shoot-input">${icon('camera')}<span>${esc(t('scan.shoot'))}</span></label>
+      <input type="file" id="shoot-input" accept="image/*" capture="environment" hidden>
       <label class="btn" for="photo-input">${icon('image')}<span>${esc(t('scan.photo'))}</span></label>
       <input type="file" id="photo-input" accept="image/*" hidden>
-      <button class="btn" type="button" data-act="manual">${icon('edit')}<span>${esc(t('scan.manual'))}</span></button>
     </div>
+    <p class="muted small">${esc(t('scan.photoHint'))}</p>
+    <button class="btn cash-btn" type="button" data-act="manual">${icon('wallet')}<span><b>${esc(t('q.title'))}</b><small>${esc(t('scan.cashHint'))}</small></span></button>
     <form id="paste-form" class="stack">
       <label for="paste-input">${esc(t('scan.paste.label'))}</label>
       <div class="row">
@@ -372,18 +642,32 @@ function renderScan() {
     </form>`;
   scanner.video = $('#video');
   $('#cam-btn').addEventListener('click', () => (cameraOn ? stopCamera() : startCamera()));
-  $('#photo-input').addEventListener('change', async e => {
+  const fromPhoto = async e => {
     const f = e.target.files[0];
     e.target.value = '';
     if (!f) return;
     setScanMsg(t('scan.busy'));
+    let qr = null;
+    try { qr = await decodeImageFile(f); } catch (err) {}
+    if (qr && parseReceiptQR(qr).ok) { lastFromCamera = false; handleScan(qr); return; }
+    // No QR code: read the printed text instead, on the phone.
+    setScanMsg(t('ocr.reading', { pct: 0 }));
     try {
-      const text = await decodeImageFile(f);
-      if (!text) { setScanMsg(t('scan.noQR'), true); return; }
-      lastFromCamera = false;
-      handleScan(text);
-    } catch (err) { setScanMsg(t('scan.noQR'), true); }
-  });
+      const res = await readReceiptPhoto(f, p => setScanMsg(t('ocr.reading', { pct: Math.round(p * 100) })));
+      setScanMsg('');
+      if (!res.amount && !res.store) { setScanMsg(t('ocr.nothing'), true); return; }
+      const known = res.tin && db.storeName(res.tin);
+      openManual({
+        amount: res.amount, day: res.day, fromPhoto: true,
+        store: known || (res.store ? tidySellerName(res.store) : ''),
+        cat: res.tin && db.storeCat(res.tin) ? db.storeCat(res.tin) : undefined,
+      });
+    } catch (err) {
+      setScanMsg(t('ocr.fail'), true);
+    }
+  };
+  $('#photo-input').addEventListener('change', fromPhoto);
+  $('#shoot-input').addEventListener('change', fromPhoto);
   $('#paste-form').addEventListener('submit', e => {
     e.preventDefault();
     lastFromCamera = false;
@@ -473,8 +757,13 @@ function refreshOpen(iic) {
   if (!r) return;
   const fb = $('#fbox');
   if (fb) fb.innerHTML = fiscalBox(r);
-  const ib = $('#ibox');
-  if (ib) ib.innerHTML = itemsBox(r);
+  const rb = $('#rbox');
+  if (rb) {
+    // Stamp it with a little thump only when the answer has just arrived.
+    const st = fiscalState(r);
+    rb.innerHTML = receiptPaper(r, rb.dataset.st === 'checking' && st !== 'checking');
+    rb.dataset.st = st;
+  }
   if (openKind === 'new') {
     const name = $('#nf-name');
     if (name && !name.value.trim() && db.storeName(r.tin)) {
@@ -496,34 +785,50 @@ function fiscalBox(r) {
   const mismatch = st === 'ok' && r.portalTotal != null && Math.abs(r.portalTotal - r.total) > 0.5
     ? `<p class="fstate warn">${icon('warning')}<span>${esc(t('f.mismatch', { amount: fmtL(r.portalTotal) }))}</span></p>` : '';
   switch (st) {
-    case 'ok': return `<p class="fstate ok">${icon('checkmark_circle')}<span>${esc(t('f.ok'))}</span></p>${mismatch}`;
+    case 'ok': return mismatch; // the stamp on the receipt says it
     case 'checking': return `<p class="fstate muted"><span class="spin" aria-hidden="true"></span><span>${esc(t('f.checking'))}</span></p>`;
     case 'pending': return `<p class="fstate">${icon('arrow_sync')}<span>${esc(t('f.pending'))} <span class="muted small">${esc(t('f.pending.why'))}</span></span></p>${btn(t('f.recheck'))}`;
     case 'missing': return `<div class="fmissing"><p class="fstate warn">${icon('warning')}<span><b>${esc(t('f.missing'))}</b><br><span class="small">${esc(t('f.missing.why'))}</span></span></p>
       <div class="row wrap gap">${btn(t('f.recheck'))}<a class="btn small" href="${FISKAL_URL}" target="_blank" rel="noopener">${icon('open')}<span>${esc(t('f.ask'))}</span></a></div></div>`;
-    case 'error': return `<p class="fstate muted">${icon('warning')}<span>${esc(t('f.error'))}</span></p>${btn(t('f.recheck'))}`;
+    case 'error': return `<p class="fstate muted">${icon('warning')}<span>${esc(t('f.error'))}${r.fiscal && r.fiscal.reason ? ` <span class="small">(${esc(r.fiscal.reason)})</span>` : ''}</span></p>${btn(t('f.recheck'))}`;
     default: return portalOn() ? btn(t('f.check')) : `<p class="muted small">${esc(t('f.off'))}</p>`;
   }
 }
 
-function itemsBox(r) {
-  if (!r.items || !r.items.length) return '';
-  return `<h3>${esc(t('r.items'))}</h3>
-    <table class="tbl items">
-      <thead><tr><th>${esc(t('th.item'))}</th><th class="num">${esc(t('th.qty'))}</th><th class="num">${esc(t('th.amount'))}</th></tr></thead>
-      <tbody>${r.items.map(it => `<tr><td>${esc(it.name)}${it.qty !== 1 && it.unitPrice != null ? `<span class="muted small block">${fmtL(it.unitPrice)}${unitOf(it.unit) ? ' / ' + esc(unitOf(it.unit)) : ''}</span>` : ''}</td>
-        <td class="num">${fmtQty(it.qty)}</td><td class="num">${fmtL(it.total)}</td></tr>`).join('')}</tbody>
-      ${r.vat != null ? `<tfoot><tr><td>${esc(t('r.vat'))}</td><td></td><td class="num">${fmtL(r.vat)}</td></tr></tfoot>` : ''}
-    </table>`;
+// The receipt as paper, with the tax authority's answer stamped on it.
+function stampHtml(r, fresh) {
+  const st = fiscalState(r);
+  if (!['ok', 'missing', 'pending'].includes(st)) return '';
+  return `<div class="stamp ${st}${fresh ? ' fresh' : ''}" aria-hidden="true"><b>${esc(t('stamp.' + st))}</b><small>${esc(t('stamp.sub'))}</small></div>`;
 }
+
+function receiptPaper(r, fresh = false) {
+  const addr = r.seller && [r.seller.address, r.seller.town].filter(Boolean).join(', ');
+  const meta = [fmtDay(r.day), r.time, r.tin && !db.demo ? 'NIPT ' + r.tin : ''].filter(Boolean).join(' · ');
+  const items = r.items && r.items.length ? `<hr class="r-cut"><ul class="r-items">${r.items.map(it => `
+    <li><span>${esc(it.name)}${it.qty !== 1 && it.unitPrice != null ? `<span class="q">${fmtQty(it.qty)} × ${fmtL(it.unitPrice)}${unitOf(it.unit) ? ' / ' + esc(unitOf(it.unit)) : ''}</span>` : ''}</span><span>${fmtL(it.total)}</span></li>`).join('')}</ul>` : '';
+  const vat = r.vat != null ? `<div class="r-sum"><span>${esc(t('r.net'))}</span><span>${fmtL(r.net != null ? r.net : r.total - r.vat)}</span></div>
+    <div class="r-sum"><span>${esc(t('r.vat'))}</span><span>${fmtL(r.vat)}</span></div>` : '';
+  return `<div class="receipt">
+    ${stampHtml(r, fresh)}
+    <p class="r-store">${esc(storeLabel(r))}</p>
+    ${addr ? `<p class="r-meta">${esc(addr)}</p>` : ''}
+    <p class="r-meta">${esc(meta)}</p>
+    ${items}
+    <hr class="r-cut">
+    ${vat}
+    <div class="r-total"><span>${esc(t('th.total'))}</span><span>${fmtL(r.total)}</span></div>
+    ${!isManual(r) && !db.demo && r.iic ? `<p class="r-foot">NIVF ${esc(r.iic.slice(0, 8))}…</p>` : ''}
+  </div>`;
+}
+
 
 function openNewReceipt(iic) {
   const r = db.find(iic);
   const known = db.storeName(r.tin);
   openSheet(`
-    <h2>${icon('checkmark_circle', 'ok')} ${esc(t('new.title'))}</h2>
-    <p class="hero small-hero"><span class="hero-num">${fmtL(r.total)}</span></p>
-    <p class="sub">${fmtDay(r.day)} · ${esc(r.time)} · NIPT ${esc(r.tin)}</p>
+    <p class="kicker sheet-label">${icon('checkmark_circle', 'tiny')} ${esc(t('new.title'))}</p>
+    <div id="rbox" data-st="${fiscalState(r)}">${receiptPaper(r)}</div>
     <div id="fbox">${fiscalBox(r)}</div>
     <form id="new-form" class="stack">
       <label for="nf-name">${esc(t('new.storeName'))}</label>
@@ -535,8 +840,7 @@ function openNewReceipt(iic) {
         ${lastFromCamera ? `<button class="btn" type="submit" value="again">${icon('qr_code')}<span>${esc(t('new.again'))}</span></button>` : ''}
         <button class="btn primary" type="submit" value="save">${esc(t('new.save'))}</button>
       </div>
-    </form>
-    <div id="ibox">${itemsBox(r)}</div>`, () => {
+    </form>`, () => {
     const name = $('#nf-name'), cat = $('#nf-cat');
     let catTouched = !!db.storeCat(r.tin);
     cat.addEventListener('change', () => { catTouched = true; });
@@ -560,20 +864,9 @@ function openReceipt(iic) {
   const w = r.warranty;
   const months = [6, 12, 24, 36, 60];
   const mLabel = m => (m % 12 ? t('w.m', { n: m }) : m === 12 ? t('w.y1') : t('w.y', { n: m / 12 }));
-  const addr = r.seller && [r.seller.address, r.seller.town].filter(Boolean).join(', ');
   openSheet(`
-    <div class="sheet-head">
-      <h2>${esc(storeLabel(r))}</h2>
-    </div>
-    <p class="hero small-hero"><span class="hero-num">${fmtL(r.total)}</span></p>
+    <div id="rbox" data-st="${fiscalState(r)}">${receiptPaper(r)}</div>
     <div id="fbox">${fiscalBox(r)}</div>
-    <table class="kv">
-      <tr><th>${esc(t('r.date'))}</th><td>${fmtDay(r.day)}</td></tr>
-      <tr><th>${esc(t('r.time'))}</th><td>${esc(r.time)}</td></tr>
-      ${r.tin ? `<tr><th>${esc(t('r.nipt'))}</th><td>${esc(r.tin)}</td></tr>` : ''}
-      ${addr ? `<tr><th>${esc(t('r.address'))}</th><td>${esc(addr)}</td></tr>` : ''}
-    </table>
-    <div id="ibox">${itemsBox(r)}</div>
     <div class="stack">
       <label for="rf-name">${esc(t('r.store'))}</label>
       <input id="rf-name" autocomplete="off" value="${esc(isManual(r) ? r.storeName : db.storeName(r.tin))}" maxlength="80">
@@ -643,43 +936,107 @@ function openReceipt(iic) {
 }
 
 // ---------- manual entry ----------
-function openManual() {
+// Cash and other spending without a QR receipt: a keypad, a category, done.
+// `pre` comes from a receipt photo read on the phone: { amount, store, day, cat }.
+function openManual(pre = {}) {
+  let digits = pre.amount > 0 ? String(Math.round(pre.amount)) : '';
+  let cat = pre.cat || (pre.store ? suggestCategory(pre.store) : 'other');
+  let day = pre.day && pre.day <= todayISO() ? pre.day : todayISO();
+  const yesterday = (() => { const d = new Date(); d.setDate(d.getDate() - 1); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; })();
+  const places = [...new Set(db.receipts.filter(isManual).map(r => r.storeName).filter(Boolean))].slice(-30);
+  const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '00', '0', 'del'];
   openSheet(`
-    <h2>${esc(t('m.title'))}</h2>
-    <form id="m-form" class="stack">
-      <label for="m-store">${esc(t('m.store'))}</label>
-      <input id="m-store" autocomplete="off" maxlength="80" placeholder="${esc(t('m.store.ph'))}" required>
-      <label for="m-amount">${esc(t('m.amount'))}</label>
-      <input id="m-amount" type="number" inputmode="decimal" min="0" step="any" required>
-      <div class="row">
-        <div class="stack grow"><label for="m-date">${esc(t('m.date'))}</label><input id="m-date" type="date" value="${todayISO()}" max="${todayISO()}" required></div>
-        <div class="stack grow"><label for="m-time">${esc(t('m.time'))}</label><input id="m-time" type="time" value="${nowHM()}"></div>
-      </div>
-      <label for="m-cat">${esc(t('r.cat'))}</label>
-      ${catSelect('m-cat', 'other')}
-      <label for="m-note">${esc(t('r.note'))}</label>
-      <input id="m-note" autocomplete="off" maxlength="140" placeholder="${esc(t('r.note.ph'))}">
-      <p class="msg err" id="m-msg"></p>
-      <div class="row end"><button class="btn primary" type="submit">${icon('add')}<span>${esc(t('m.add'))}</span></button></div>
-    </form>`, () => {
-    const store = $('#m-store'), cat = $('#m-cat');
-    let catTouched = false;
-    cat.addEventListener('change', () => { catTouched = true; });
-    store.addEventListener('input', () => { if (!catTouched) cat.value = suggestCategory(store.value); });
-    store.focus();
-    $('#m-form').addEventListener('submit', e => {
-      e.preventDefault();
-      const amount = Number(String($('#m-amount').value).replace(',', '.'));
-      const day = $('#m-date').value, time = $('#m-time').value || '12:00';
-      if (!store.value.trim() || !(amount > 0) || !/^\d{4}-\d{2}-\d{2}$/.test(day)) { $('#m-msg').textContent = t('m.bad'); return; }
+    <p class="kicker sheet-label">${icon(pre.fromPhoto ? 'image' : 'wallet', 'tiny')} ${esc(t(pre.fromPhoto ? 'q.photo' : 'q.cash'))}</p>
+    ${pre.fromPhoto ? `<p class="notice">${icon('image')}<span>${esc(t('q.fromPhoto'))}</span></p>` : ''}
+    <p class="q-amount" id="q-amount" aria-live="polite"></p>
+    <div class="keypad" role="group" aria-label="${esc(t('m.amount'))}">
+      ${keys.map(k => `<button type="button" data-key="${k}" ${k === 'del' ? `aria-label="${esc(t('q.del'))}"` : ''}>${k === 'del' ? '⌫' : k}</button>`).join('')}
+    </div>
+    <div class="chips q-cats" id="q-cats">${CATEGORIES.map(c => `<button type="button" class="chip" data-qcat="${c}" aria-pressed="${c === cat}">${esc(t('cat.' + c))}</button>`).join('')}</div>
+    <input id="q-where" autocomplete="off" maxlength="80" list="q-places" placeholder="${esc(t('q.where'))}" value="${esc(pre.store || '')}" aria-label="${esc(t('m.store'))}">
+    <datalist id="q-places">${places.map(p => `<option value="${esc(p)}">`).join('')}</datalist>
+    <div class="chips q-days" id="q-days">
+      <button type="button" class="chip" data-qday="${todayISO()}">${esc(t('q.today'))}</button>
+      <button type="button" class="chip" data-qday="${yesterday}">${esc(t('q.yesterday'))}</button>
+      <label class="chip q-pick">${esc(t('q.other'))}<input type="date" id="q-date" max="${todayISO()}" value="${day}"></label>
+    </div>
+    <label class="check" ${pre.fromPhoto ? 'hidden' : ''}><input type="checkbox" id="q-rep"> <span id="q-rep-l"></span></label>
+    <button class="btn primary big q-save" type="button" id="q-save" disabled></button>`, () => {
+    const amountEl = $('#q-amount'), save = $('#q-save'), where = $('#q-where');
+    let catTouched = !!pre.cat;
+    const value = () => (digits ? Number(digits) : 0);
+    const paint = () => {
+      amountEl.innerHTML = `${digits ? esc(fmtL(value()).slice(0, -2)) : '0'}<span class="cur">L</span>`;
+      amountEl.classList.toggle('empty', !digits);
+      save.disabled = !(value() > 0);
+      save.textContent = value() > 0 ? t('q.add', { amount: fmtL(value()) }) : t('q.addEmpty');
+      $$('#q-cats .chip').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.qcat === cat)));
+      $$('#q-days [data-qday]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.qday === day)));
+      $('.q-pick').setAttribute('aria-pressed', String(day !== todayISO() && day !== yesterday));
+      $('#q-rep-l').textContent = t('q.repeat', { day: +day.slice(8, 10) });
+    };
+    const press = k => {
+      if (k === 'del') digits = digits.slice(0, -1);
+      else if (digits.length < 9) digits = (digits + k).replace(/^0+/, '');
+      if (navigator.vibrate) navigator.vibrate(8);
+      paint();
+    };
+    $('.keypad').addEventListener('click', e => { const b = e.target.closest('[data-key]'); if (b) press(b.dataset.key); });
+    $('#q-cats').addEventListener('click', e => { const b = e.target.closest('[data-qcat]'); if (b) { cat = b.dataset.qcat; catTouched = true; paint(); } });
+    $('#q-days').addEventListener('click', e => { const b = e.target.closest('[data-qday]'); if (b) { day = b.dataset.qday; $('#q-date').value = day; paint(); } });
+    $('#q-date').addEventListener('change', e => { if (/^\d{4}-\d{2}-\d{2}$/.test(e.target.value) && e.target.value <= todayISO()) { day = e.target.value; paint(); } });
+    $('.q-pick').addEventListener('click', () => { const d = $('#q-date'); try { d.showPicker && d.showPicker(); } catch (e) {} });
+    where.addEventListener('input', () => { if (!catTouched && where.value.trim()) { const c = suggestCategory(where.value); if (c !== 'other') { cat = c; paint(); } } });
+    // A hardware keyboard works too (laptops).
+    const onKey = e => {
+      if (e.target === where || e.target.tagName === 'INPUT') return;
+      if (/^\d$/.test(e.key)) { press(e.key); e.preventDefault(); }
+      else if (e.key === 'Backspace') { press('del'); e.preventDefault(); }
+      else if (e.key === 'Enter' && !save.disabled) { save.click(); e.preventDefault(); }
+    };
+    sheet().addEventListener('keydown', onKey);
+    sheet().addEventListener('close', () => sheet().removeEventListener('keydown', onKey), { once: true });
+    save.addEventListener('click', () => {
+      if (!(value() > 0)) return;
       if (db.demo) db.endDemo();
+      const name = where.value.trim() || t('cat.' + cat);
+      const time = day === todayISO() ? nowHM() : '12:00';
       const iic = 'M' + Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2, 8).toUpperCase();
-      db.add({ iic, src: 'manual', tin: '', storeName: store.value.trim(), crtd: `${day}T${time}:00`, day, time, total: Math.round(amount * 100) / 100, cat: cat.value, catSet: true, note: $('#m-note').value.trim(), url: '' });
+      db.add({ iic, src: 'manual', tin: '', storeName: name, crtd: `${day}T${time}:00`, day, time, total: value(), cat, catSet: true, note: pre.fromPhoto ? 'foto' : '', url: '' });
+      if ($('#q-rep').checked) {
+        const rec = db.pref('recurring') || [];
+        rec.push({ id: Date.now().toString(36), name, amount: value(), cat, dom: +day.slice(8, 10), last: monthKey(day) });
+        db.setPref('recurring', rec);
+      }
       closeSheet();
       toast(t('toast.saved'));
-      go('list');
+      render();
     });
+    paint();
   });
+}
+
+// Repeating spending (rent, bills): add this month's entry once its day has come,
+// and catch up on months the app wasn't opened. Ids are fixed per month, so nothing doubles.
+function applyRecurring() {
+  if (db.demo) return;
+  const rec = db.pref('recurring') || [];
+  if (!rec.length) return;
+  const today = todayISO(), cur = monthKey(today);
+  let added = 0;
+  for (const r of rec) {
+    let m = shiftMonth(r.last, 1);
+    while (m <= cur) {
+      const d = Math.min(r.dom, daysIn(m));
+      const day = `${m}-${pad(d)}`;
+      if (day > today) break;
+      if (db.add({ iic: `R${r.id}${m.replace('-', '')}`.toUpperCase(), src: 'manual', tin: '', storeName: r.name, crtd: `${day}T09:00:00`, day, time: '09:00', total: r.amount, cat: r.cat, catSet: true, note: '', url: '', recurring: r.id })) added++;
+      r.last = m;
+      m = shiftMonth(m, 1);
+    }
+  }
+  db.setPref('recurring', rec);
+  if (added) toast(added === 1 ? t('rec.added', { n: added }) : t('rec.addedN', { n: added }));
 }
 
 // ---------- split ----------
@@ -824,6 +1181,7 @@ function openSplit(iic) {
 // ---------- receipts list & prices ----------
 let query = '';
 let listTab = 'receipts';
+let listCat = '';
 function renderList() {
   const el = $('#view-list');
   if (!el.dataset.ready) {
@@ -834,6 +1192,7 @@ function renderList() {
         <label><input type="radio" name="ltab" value="prices"><span>${icon('tag')} ${esc(t('list.tab.prices'))}</span></label>
       </div>
       <input type="search" id="list-q" autocomplete="off">
+      <div class="chips cats" id="list-cats"></div>
       <div id="list-body"></div>`;
     $('#list-q').addEventListener('input', e => { query = e.target.value; renderListBody(); });
     $$('input[name=ltab]').forEach(i => i.addEventListener('change', () => { listTab = i.value; query = ''; renderList(); }));
@@ -847,15 +1206,21 @@ function renderList() {
 }
 
 function renderListBody() {
-  if (listTab === 'prices') { renderPrices(); return; }
+  const chips = $('#list-cats');
+  if (listTab === 'prices') { chips.hidden = true; renderPrices(); return; }
   const body = $('#list-body');
+  const present = CATEGORIES.filter(c => db.receipts.some(r => catOf(r) === c));
+  if (listCat && !present.includes(listCat)) listCat = '';
+  chips.hidden = present.length < 2;
+  chips.innerHTML = ['', ...present].map(c => `<button type="button" class="chip" data-lcat="${c}" aria-pressed="${listCat === c}">${esc(c ? t('cat.' + c) : t('list.all'))}</button>`).join('');
   const q = query.trim().toLowerCase();
   const all = db.receipts.slice().sort(byDateDesc);
   if (!all.length) {
     body.innerHTML = `<p class="muted pad">${esc(t('list.empty'))}</p><p><a class="btn primary" href="#scan">${icon('qr_code')}<span>${esc(t('home.empty.cta'))}</span></a></p>`;
     return;
   }
-  const rs = q ? all.filter(r => (storeLabel(r) + ' ' + r.tin + ' ' + (r.note || '') + ' ' + (r.items || []).map(i => i.name).join(' ')).toLowerCase().includes(q)) : all;
+  const pool = listCat ? all.filter(r => catOf(r) === listCat) : all;
+  const rs = q ? pool.filter(r => (storeLabel(r) + ' ' + r.tin + ' ' + (r.note || '') + ' ' + (r.items || []).map(i => i.name).join(' ')).toLowerCase().includes(q)) : all;
   if (!rs.length) { body.innerHTML = `<p class="muted pad">${esc(t('list.noMatch'))}</p>`; return; }
   const groups = [];
   for (const r of rs) {
@@ -945,6 +1310,186 @@ function openProduct(key) {
   () => $('#p-close').addEventListener('click', closeSheet));
 }
 
+// ---------- Kupon's server: features that need it appear only when it answers ----------
+let apiUp = false;
+async function checkApi() {
+  if (!API_BASE) return;
+  try {
+    const ctrl = new AbortController();
+    setTimeout(() => ctrl.abort(), 5000);
+    const res = await fetch(API_BASE + '/v1/health', { signal: ctrl.signal, credentials: 'omit' });
+    apiUp = res.ok;
+  } catch (e) { apiUp = false; }
+  if (apiUp && !sheet().open) render();
+}
+
+// ---------- sync between phones ----------
+const ago = iso => {
+  if (!iso) return '';
+  const m = Math.round((Date.now() - Date.parse(iso)) / 60000);
+  return m < 1 ? t('sy.now') : m < 60 ? t('sy.min', { n: m }) : m < 1440 ? t('sy.hour', { n: Math.round(m / 60) }) : fmtDay(iso.slice(0, 10));
+};
+function syncSection() {
+  if (db.demo || (!apiUp && !db.pref('sync'))) return '';
+  const st = db.pref('sync');
+  const head = `<h2>${esc(t('sy.title'))}</h2>`;
+  if (!syncSupported()) return head + `<p class="muted small">${esc(t('sy.https'))}</p>`;
+  if (!st) {
+    return head + `<p class="small">${esc(t('sy.intro'))}</p>
+      <div class="row wrap"><button class="btn primary" type="button" data-act="sync-on">${icon('arrow_sync')}<span>${esc(t('sy.on'))}</span></button>
+      <button class="btn" type="button" data-act="sync-join">${esc(t('sy.join'))}</button></div>`;
+  }
+  return head + `<p class="small">${icon('checkmark_circle', 'tiny')} ${esc(st.at ? t('sy.last', { when: ago(st.at) }) : t('sy.never'))}${st.error ? ` <span class="warn">· ${esc(t('sy.err.' + (st.error.startsWith('http') ? 'network' : st.error)))}</span>` : ''}</p>
+    <div class="row wrap"><button class="btn" type="button" data-act="sync-now">${icon('arrow_sync')}<span>${esc(t('sy.now.btn'))}</span></button>
+    <button class="btn" type="button" data-act="sync-code">${esc(t('sy.show'))}</button>
+    <button class="btn link" type="button" data-act="sync-off"><span>${esc(t('sy.off'))}</span></button></div>`;
+}
+
+async function turnSyncOn(btn) {
+  btn.disabled = true;
+  const res = await enableSync();
+  if (!res.ok) { toast(t('sy.err.' + (res.error && res.error.startsWith('http') ? 'network' : res.error || 'network'))); disableSync(); render(); return; }
+  render();
+  openSyncCode(true);
+}
+
+function openSyncCode(first = false) {
+  const st = db.pref('sync');
+  if (!st) return;
+  openSheet(`
+    <h2>${esc(t('sy.codeTitle'))}</h2>
+    ${first ? `<p>${esc(t('sy.codeFirst'))}</p>` : ''}
+    <p class="sync-code" id="sy-code">${esc(st.code)}</p>
+    <div class="row wrap"><button class="btn" type="button" id="sy-copy">${icon('copy')}<span>${esc(t('sy.copy'))}</span></button>
+    ${navigator.share ? `<button class="btn" type="button" id="sy-share">${icon('share')}<span>${esc(t('sy.shareCode'))}</span></button>` : ''}</div>
+    <p class="notice">${icon('warning')}<span>${esc(t('sy.keep'))}</span></p>
+    <p class="muted small">${esc(t('sy.how'))}</p>
+    <div class="row end"><button class="btn primary" type="button" id="sy-close">${esc(t('r.close'))}</button></div>`, () => {
+    $('#sy-copy').addEventListener('click', async () => { try { await navigator.clipboard.writeText(st.code); toast(t('sy.copied')); } catch (e) { toast(st.code); } });
+    const sh = $('#sy-share');
+    if (sh) sh.addEventListener('click', () => navigator.share({ text: st.code }).catch(() => {}));
+    $('#sy-close').addEventListener('click', closeSheet);
+  });
+}
+
+function openJoin() {
+  openSheet(`
+    <h2>${esc(t('sy.join'))}</h2>
+    <form id="sy-form" class="stack">
+      <label for="sy-in">${esc(t('sy.codeLabel'))}</label>
+      <input id="sy-in" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XX">
+      <p class="muted small">${esc(t('sy.joinHint'))}</p>
+      <p class="msg err" id="sy-msg"></p>
+      <div class="row end"><button class="btn primary" type="submit">${esc(t('sy.joinBtn'))}</button></div>
+    </form>`, () => {
+    $('#sy-form').addEventListener('submit', async e => {
+      e.preventDefault();
+      const code = $('#sy-in').value;
+      if (!validCode(code)) { $('#sy-msg').textContent = t('sy.err.bad_code'); return; }
+      const b = e.submitter; if (b) b.disabled = true;
+      $('#sy-msg').textContent = '';
+      const res = await enableSync(code);
+      if (b) b.disabled = false;
+      if (!res.ok) { $('#sy-msg').textContent = t('sy.err.' + (res.error && res.error.startsWith('http') ? 'network' : res.error || 'network')); return; }
+      closeSheet();
+      toast(t('sy.joined', { n: db.receipts.length }));
+    });
+  });
+}
+
+// ---------- AI coach (opt-in; sends category totals only) ----------
+function coachSection() {
+  if (!apiUp) return '';
+  return `<h2>${esc(t('ai.title'))}</h2>
+    <label class="check"><input type="checkbox" data-act="coach-toggle" ${db.pref('coach') ? 'checked' : ''}> <span>${esc(t('ai.toggle'))}</span></label>
+    <p class="muted small">${esc(t('ai.privacy'))}</p>`;
+}
+
+// Exactly what leaves the phone: numbers per category, nothing else.
+function coachSummary() {
+  const today = todayISO(), key = monthKey(today), day = +today.slice(8, 10);
+  const rs = monthReceipts(key);
+  const prevAll = monthReceipts(shiftMonth(key, -1));
+  const prev = prevAll.filter(r => +r.day.slice(8, 10) <= day);
+  const byCat = list => { const m = {}; for (const r of list) m[catOf(r)] = Math.round((m[catOf(r)] || 0) + r.total); return m; };
+  return {
+    month: key, dayOfMonth: day, daysInMonth: daysIn(key),
+    total: Math.round(sum(rs)), byCategory: byCat(rs),
+    lastMonthSameDays: byCat(prev), lastMonthTotal: Math.round(sum(prevAll)),
+    monthlyLimit: db.pref('limit') > 0 ? db.pref('limit') : null, receipts: rs.length,
+  };
+}
+
+function openCoach() {
+  const summary = coachSummary();
+  const asks = [t('ai.q1'), t('ai.q2'), t('ai.q3')];
+  openSheet(`
+    <p class="kicker sheet-label">${icon('people', 'tiny')} ${esc(t('ai.title'))}</p>
+    <div class="chips" id="ai-asks">${asks.map(q => `<button type="button" class="chip" data-q="${esc(q)}">${esc(q)}</button>`).join('')}</div>
+    <form id="ai-form" class="stack">
+      <label for="ai-q">${esc(t('ai.label'))}</label>
+      <input id="ai-q" maxlength="300" autocomplete="off" placeholder="${esc(t('ai.ph'))}">
+      <div class="row end"><button class="btn primary" type="submit">${esc(t('ai.send'))}</button></div>
+    </form>
+    <div id="ai-out" aria-live="polite"></div>
+    <details class="ai-sent"><summary class="muted small">${esc(t('ai.sent'))}</summary><pre>${esc(JSON.stringify(summary, null, 1))}</pre></details>`, () => {
+    const out = $('#ai-out'), q = $('#ai-q');
+    $('#ai-asks').addEventListener('click', e => { const b = e.target.closest('[data-q]'); if (b) { q.value = b.dataset.q; $('#ai-form').requestSubmit(); } });
+    $('#ai-form').addEventListener('submit', async e => {
+      e.preventDefault();
+      const question = q.value.trim();
+      if (question.length < 3) return;
+      const btn = $('#ai-form button'); btn.disabled = true;
+      out.innerHTML = `<p class="fstate muted"><span class="spin" aria-hidden="true"></span><span>${esc(t('ai.thinking'))}</span></p>`;
+      try {
+        const res = await fetch(API_BASE + '/v1/coach', { method: 'POST', credentials: 'omit', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ question, lang: getLang(), summary }) });
+        const j = await res.json().catch(() => ({}));
+        if (res.status === 429) throw new Error(j.error === 'busy' ? 'busy' : 'rate');
+        if (!res.ok || !j.answer) throw new Error(j.refused ? 'refused' : 'down');
+        out.innerHTML = `<div class="ai-answer"><p class="ai-q">${esc(question)}</p>${j.answer.split(/\n+/).map(p => `<p>${esc(p.replace(/^[-*•]\s*/, '· '))}</p>`).join('')}</div>`;
+      } catch (err) {
+        out.innerHTML = `<p class="fstate warn">${icon('warning')}<span>${esc(t('ai.err.' + (['rate', 'busy', 'refused'].includes(err.message) ? err.message : 'down')))}</span></p>`;
+      } finally { btn.disabled = false; }
+    });
+  });
+}
+
+// ---------- one store ----------
+function openStore(key) {
+  const rs = db.receipts.filter(r => storeKey(r) === key).sort(byDateDesc);
+  if (!rs.length) return;
+  const total = sum(rs);
+  const counts = new Map();
+  for (const r of rs) {
+    for (const it of r.items || []) {
+      const k = productKey(it.name);
+      const c = counts.get(k) || { name: it.name, n: 0, last: null };
+      c.n++;
+      if (c.last == null) c.last = it.unitPrice; // newest receipt first, so this is the latest price
+      counts.set(k, c);
+    }
+  }
+  const top = [...counts.values()].sort((a, b) => b.n - a.n).slice(0, 6);
+  openSheet(`
+    <p class="kicker sheet-label">${esc(t('cat.' + catOf(rs[0])))}${rs[0].tin && !db.demo ? ' · NIPT ' + esc(rs[0].tin) : ''}</p>
+    <h2>${esc(storeLabel(rs[0]))}</h2>
+    <dl class="tally">
+      <div><dt>${esc(t('st.visits'))}</dt><dd>${rs.length}</dd></div>
+      <div><dt>${esc(t('st.total'))}</dt><dd>${fmtL(total)}</dd></div>
+      <div><dt>${esc(t('st.avg'))}</dt><dd>${fmtL(Math.round(total / rs.length))}</dd></div>
+    </dl>
+    <p class="muted small">${esc(t('st.first', { date: fmtDay(rs[rs.length - 1].day), last: fmtDay(rs[0].day) }))}</p>
+    ${top.length ? `<h3>${esc(t('st.items'))}</h3>
+      <ul class="rows">${top.map(c => `<li><span class="rk">${c.n}×</span><span class="rl">${esc(c.name)}</span><span class="rv">${c.last != null ? fmtL(c.last) : ''}</span></li>`).join('')}</ul>` : ''}
+    <h3>${esc(t('st.recent'))}</h3>
+    <ul class="rlist">${rs.slice(0, 8).map(r => `
+      <li><button type="button" data-open="${esc(r.iic)}"><span class="rmain"><span class="rname">${fmtDay(r.day)}</span>
+        <span class="muted small">${esc(r.time)}${r.items && r.items.length ? ' · ' + r.items.length + ' ' + esc(t('r.items').toLowerCase()) : ''}</span></span>
+        <span class="ramt">${fmtL(r.total)}</span></button></li>`).join('')}</ul>
+    <div class="row end"><button class="btn primary" type="button" id="st-close">${esc(t('r.close'))}</button></div>`,
+  () => $('#st-close').addEventListener('click', closeSheet));
+}
+
 // ---------- warranty vault ----------
 function warrantyRows() {
   const today = todayISO();
@@ -1029,6 +1574,15 @@ function renderData() {
       <label class="btn" for="import-input">${icon('arrow_upload')}<span>${esc(t('d.import'))}</span></label>
       <input type="file" id="import-input" accept=".json,.csv,application/json,text/csv" hidden>
     </div>`}
+    ${syncSection()}
+    ${coachSection()}
+    ${(db.pref('recurring') || []).length ? `<h2>${esc(t('rec.title'))}</h2>
+      <p class="muted small">${esc(t('rec.hint'))}</p>
+      <ul class="rlist">${db.pref('recurring').map(r => `<li><div class="rec-row"><span class="rmain"><span class="rname">${esc(r.name)}</span>
+        <span class="muted small">${esc(t('cat.' + r.cat))} · ${esc(t('rec.day', { day: r.dom }))}</span></span>
+        <span class="ramt">${fmtL(r.amount)}</span><button class="btn small" type="button" data-act="rec-stop" data-id="${esc(r.id)}">${esc(t('rec.stop'))}</button></div></li>`).join('')}</ul>` : ''}
+    <h2>${esc(t('lim.title'))}</h2>
+    <p><button class="btn" type="button" data-act="limit">${db.pref('limit') > 0 ? esc(fmtL(db.pref('limit')) + ' · ' + t('lim.edit')) : esc(t('lim.set'))}</button></p>
     <h2>${esc(t('d.budgets'))}</h2>
     <p class="muted small">${esc(t('d.budgets.hint'))}</p>
     <table class="tbl budgets"><tbody>${CATEGORIES.map(c => `
@@ -1048,9 +1602,10 @@ function renderData() {
         </tbody></table>` : ''}
     <h2>Kupon</h2>
     <p class="muted">${esc(t('d.about'))}</p>
+    <p class="muted small">${esc(t('d.notGov'))}</p>
     <p class="muted">${esc(t('d.fiskal'))} <a href="${FISKAL_URL}" target="_blank" rel="noopener">Asistenti Fiskal ↗</a></p>
-    <p class="muted small">${esc(t('d.by'))} <a href="https://github.com/Aristxa/KUPON" target="_blank" rel="noopener">${esc(t('d.source'))}</a> · <a href="https://aristxa.github.io" target="_blank" rel="noopener">aristxa.github.io</a></p>
-    <p class="muted small">Icons: Microsoft Fluent UI System Icons (MIT). QR fallback: jsQR (Apache-2.0).</p>
+    <p class="muted small"><a href="https://github.com/Aristxa/KUPON" target="_blank" rel="noopener">${esc(t('d.source'))}</a> · Icons: Microsoft Fluent UI System Icons (MIT). QR fallback: jsQR (Apache-2.0).</p>
+    <p class="credit">${esc(t('d.credit'))} <a href="https://www.novaris.al" target="_blank" rel="noopener">Novaris Labs ↗</a></p>
     ${!db.demo && db.receipts.length ? `<div class="row"><button class="btn danger" type="button" id="wipe">${icon('delete')}<span>${esc(t('d.danger'))}</span></button></div>` : ''}
     ${!db.receipts.length && !db.demo ? `<p><button class="btn link" type="button" data-act="demo">${esc(t('demo.start'))}</button></p>` : ''}
   `;
@@ -1181,15 +1736,15 @@ function importJSON(text) {
 
 // ---------- sample data (clearly labelled, never saved) ----------
 function sampleData() {
-  const S = ' (shembull)';
+  // Generic names, so no real business is implied; the banner says it's sample data.
   const stores = {
-    DEMO0000001A: { name: 'Supermarket A' + S, cat: 'groceries' },
-    DEMO0000002B: { name: 'Supermarket B' + S, cat: 'groceries' },
-    DEMO0000003C: { name: 'Kafe e Lagjes' + S, cat: 'cafe' },
-    DEMO0000004D: { name: 'Karburant' + S, cat: 'fuel' },
-    DEMO0000005E: { name: 'Farmaci' + S, cat: 'pharmacy' },
-    DEMO0000006F: { name: 'Dyqan elektronike' + S, cat: 'electronics' },
-    DEMO0000007G: { name: 'Restorant tradicional' + S, cat: 'cafe' },
+    DEMO0000001A: { name: 'Supermarketi', cat: 'groceries' },
+    DEMO0000002B: { name: 'Marketi i lagjes', cat: 'groceries' },
+    DEMO0000003C: { name: 'Kafeja e lagjes', cat: 'cafe' },
+    DEMO0000004D: { name: 'Karburanti', cat: 'fuel' },
+    DEMO0000005E: { name: 'Farmacia', cat: 'pharmacy' },
+    DEMO0000006F: { name: 'Dyqani i elektronikës', cat: 'electronics' },
+    DEMO0000007G: { name: 'Restoranti tradicional', cat: 'cafe' },
   };
   const grocery = [['Qumësht 1L', 140], ['Bukë', 80], ['Vezë 10 copë', 260], ['Djathë i bardhë 1kg', 850], ['Domate 1kg', 150],
     ['Kafe 250g', 650], ['Ujë 1.5L', 60], ['Makarona 500g', 120], ['Vaj ulliri 1L', 1100], ['Mollë 1kg', 120], ['Kos 1kg', 230], ['Oriz 1kg', 190]];
@@ -1253,17 +1808,20 @@ function sampleData() {
 
   const lap = addMonths(today, -23);
   const l = mk('DEMO0000006F', lap, '17:20', [{ name: 'Laptop 14"', unit: 'copë', qty: 1, unitPrice: 89900, total: 89900, vatRate: 20 }]);
-  l.warranty = { months: 24, item: 'Laptop 14"' + S };
+  l.warranty = { months: 24, item: 'Laptop 14"' };
   const fr = addMonths(today, -8);
   const f2 = mk('DEMO0000006F', fr, '11:05', [{ name: 'Frigorifer', unit: 'copë', qty: 1, unitPrice: 54900, total: 54900, vatRate: 20 }]);
-  f2.warranty = { months: 36, item: 'Frigorifer' + S };
+  f2.warranty = { months: 36, item: 'Frigorifer' };
   return { receipts, stores };
 }
 
 // ---------- wiring ----------
 document.addEventListener('click', e => {
-  const a = e.target.closest('[data-act], [data-open], [data-ics], [data-check], [data-product], .tabbar a');
+  const a = e.target.closest('[data-act], [data-open], [data-ics], [data-check], [data-product], [data-cat], [data-store], [data-lcat], .tabbar a');
   if (!a) return;
+  if (a.dataset.cat) { listTab = 'receipts'; listCat = a.dataset.cat; query = ''; go('list'); return; }
+  if (a.dataset.store) { openStore(a.dataset.store); return; }
+  if (a.dataset.lcat != null) { listCat = a.dataset.lcat; renderListBody(); return; }
   if (a.dataset.open) { openReceipt(a.dataset.open); return; }
   if (a.dataset.ics) { downloadICS(a.dataset.ics); return; }
   if (a.dataset.check) { checkReceipt(a.dataset.check); return; }
@@ -1273,8 +1831,20 @@ document.addEventListener('click', e => {
   else if (act === 'demo') { db.startDemo(sampleData()); viewMonth = monthKey(todayISO()); go('home'); }
   else if (act === 'exit-demo') { db.endDemo(); viewMonth = monthKey(todayISO()); render(); }
   else if (act === 'manual') openManual();
+  else if (act === 'share') shareMonth(a);
+  else if (act === 'prices') { listTab = 'prices'; query = ''; go('list'); }
   else if (act === 'csv') exportCSV();
-  else if (act === 'json') download(`kupon-${todayISO()}.json`, db.exportJSON(), 'application/json');
+  else if (act === 'json') { download(`kupon-${todayISO()}.json`, db.exportJSON(), 'application/json'); if (!db.demo) { db.setPref('lastExport', new Date().toISOString()); render(); } }
+  else if (act === 'limit') openLimit();
+  else if (act === 'sync-on') turnSyncOn(a);
+  else if (act === 'sync-join') openJoin();
+  else if (act === 'sync-code') openSyncCode();
+  else if (act === 'sync-now') { a.disabled = true; syncNow().then(r => { toast(r.ok ? t('sy.done') : t('sy.err.' + (r.error && r.error.startsWith('http') ? 'network' : r.error || 'network'))); render(); }); }
+  else if (act === 'sync-off') { if (!a.dataset.armed) { a.dataset.armed = '1'; a.querySelector('span').textContent = t('sy.offConfirm'); return; } disableSync(); render(); }
+  else if (act === 'coach') openCoach();
+  else if (act === 'coach-toggle') { db.setPref('coach', !db.pref('coach')); render(); }
+  else if (act === 'rec-stop') { db.setPref('recurring', (db.pref('recurring') || []).filter(r => r.id !== a.dataset.id)); render(); }
+  else if (act === 'later') { db.setPref(a.dataset.k, new Date().toISOString()); render(); }
   else if (act === 'install' && installEvt) { installEvt.prompt(); installEvt.userChoice.finally(() => { installEvt = null; render(); }); }
   else if (act === 'lang') {
     setLang(getLang() === 'sq' ? 'en' : 'sq');
@@ -1302,6 +1872,9 @@ $$('[data-icon]').forEach(el => { el.insertAdjacentHTML('afterbegin', icon(el.da
 
 setLang(db.pref('lang') || 'sq');
 applyStatic();
+applyRecurring();
+startAutoSync(r => { if (r && r.ok && !sheet().open) render(); });
+checkApi();
 go(location.hash.slice(1) || 'home');
 setTimeout(recheckPending, 1500);
 
