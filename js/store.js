@@ -12,7 +12,7 @@ const HINTS = {
   pharmacy: ['farmaci', 'pharma', 'barnatore', 'optik'],
   clothing: ['zara', 'bershka', 'pull', 'stradivarius', 'mango', 'lc waikiki', 'waikiki', 'h&m', 'defacto', 'koton', 'nike', 'adidas', 'veshje', 'kepuc', 'moda', 'fashion', 'shoes', 'intimissimi', 'calzedonia'],
   transport: ['taksi', 'taxi', 'uber', 'bolt', 'autobus', 'bus', 'tren', 'parking', 'parkim', 'furgon', 'biletë', 'bilete'],
-  home: ['qira', 'qiraja', 'rent', 'drita', 'oshee', 'ujë', 'ujesjelles', 'ujësjellës', 'ukt', 'fatura', 'internet', 'telefon', 'mirëmbajtje', 'pallati'],
+  home: ['qera', 'qeraja', 'qira', 'qiraja', 'rent', 'drita', 'oshee', 'ujë', 'ujesjelles', 'ujësjellës', 'ukt', 'fatura', 'internet', 'telefon', 'mirëmbajtje', 'pallati'],
   care: ['berber', 'sallon', 'parukeri', 'barber', 'estetik', 'manikyr', 'kozmetik', 'palestër', 'palester', 'gym', 'fitness'],
   electronics: ['neptun', 'euronics', 'shpresa', 'globe', 'elektronik', 'electronic', 'apple', 'samsung', 'xiaomi', 'mobile', 'celular', 'kompjuter', 'computer', 'teknologji', 'tech', 'vodafone', 'one albania'],
 };
