@@ -127,7 +127,8 @@ export function parseReceiptText(text) {
   for (const l of lines.slice(0, 6)) {
     if (/nipt|adres|tel|rruga|fatur|kupon|data|ora|nr\./i.test(l)) continue;
     const letters = (l.match(/[A-Za-zËëÇç]/g) || []).length;
-    if (letters >= 3 && letters / l.length > 0.6) { out.store = l.replace(/[^\p{L}\p{N} .&'-]/gu, '').trim(); break; }
+    // OCR often reads the Albanian word "i" as "1" or "l" between two words.
+    if (letters >= 3 && letters / l.length > 0.6) { out.store = l.replace(/[^\p{L}\p{N} .&'-]/gu, '').replace(/(?<=\p{L} )[1l|](?= \p{L})/gu, 'I').trim(); break; }
   }
   return out;
 }

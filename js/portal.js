@@ -85,6 +85,8 @@ export function tidySellerName(name) {
   n = n.replace(/\b(SH\.?\s?P\.?\s?K\.?|SH\.?\s?A\.?|PERSON FIZIK|P\.?\s?F\.?)\s*$/i, '').replace(/[\s,.-]+$/, '');
   if (n && n === n.toUpperCase()) {
     n = n.toLowerCase().replace(/(^|[\s"'(-])(\p{L})/gu, (m, a, b) => a + b.toUpperCase());
+    // Albanian's small linking words stay small: "Supermarketi i Lagjes", "Pastiçeri e Re".
+    n = n.replace(/(?<=\S )(I|E|Të|Te|Në|Dhe|Me|Së)(?= )/g, w => w.toLowerCase());
   }
   return n;
 }

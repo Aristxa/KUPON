@@ -1354,6 +1354,9 @@ function renderShopping() {
   // Ask the server once for prices of lines we haven't looked up yet, then draw again.
   const missing = list.filter(it => !it.done && !communityCache.has(productKey(it.name))).map(it => it.name);
   if (apiUp && missing.length) communityLookup(missing).then(() => { if (listTab === 'shop' && view === 'list') renderShopping(); });
+  // Redrawing must not lose what is being typed in the add field.
+  const typing = $('#sh-in');
+  const keep = typing ? { value: typing.value, focused: document.activeElement === typing } : null;
   const open = rows.filter(r => !r.it.done);
   // Estimate: each open line at its cheapest known price; count which shop is cheapest most often.
   let est = 0, priced = 0;
@@ -1388,6 +1391,7 @@ function renderShopping() {
       </li>`).join('')}</ul>
       ${list.some(i => i.done) ? `<p><button class="btn link" type="button" data-act="sh-clear">${esc(t('sh.clear'))}</button></p>` : ''}`
       : `<p class="muted pad">${esc(t('sh.empty'))}</p>`}`;
+  if (keep) { const i = $('#sh-in'); i.value = keep.value; if (keep.focused) { i.focus({ preventScroll: true }); i.setSelectionRange(i.value.length, i.value.length); } }
   $('#sh-form').addEventListener('submit', e => {
     e.preventDefault();
     const v = $('#sh-in').value.replace(/\s+/g, ' ').trim();
@@ -1397,6 +1401,7 @@ function renderShopping() {
     if (same) same.qty = (same.qty || 1) + 1;
     else cur.push({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 5), name: v, qty: 1, done: false });
     saveShopping(cur);
+    $('#sh-in').value = '';
     renderShopping();
     $('#sh-in').focus();
   });
@@ -2149,7 +2154,7 @@ setLang(db.pref('lang') || 'sq');
 applyStatic();
 // Right after an update the browser may still hold an older i18n.js from before it. Fetch the
 // app's files fresh once and reload, rather than show text keys. ('release' must match i18n.js.)
-if (t('release') !== '7' && !sessionStorage.getItem('kupon.refreshed')) {
+if (t('release') !== '8' && !sessionStorage.getItem('kupon.refreshed')) {
   sessionStorage.setItem('kupon.refreshed', '1');
   Promise.all(['js/i18n.js', 'js/app.js', 'js/store.js', 'js/sync.js', 'js/ocr.js', 'js/config.js', 'js/portal.js', 'js/qr.js', 'js/icons.js', 'js/remind.js', 'css/app.css']
     .map(u => fetch(u, { cache: 'reload' }).catch(() => {}))).finally(() => location.reload());
