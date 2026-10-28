@@ -6,6 +6,7 @@ import { lookupReceipt, tidySellerName } from './portal.js';
 import { readReceiptPhoto } from './ocr.js';
 import { syncSupported, syncNow, enable as enableSync, disable as disableSync, validCode, startAutoSync } from './sync.js';
 import { API_BASE } from './config.js';
+import { pushSupported, needsInstall, enableReminders, syncReminders, disableReminders } from './remind.js';
 
 const $ = (s, root = document) => root.querySelector(s);
 const $$ = (s, root = document) => [...root.querySelectorAll(s)];
@@ -116,6 +117,7 @@ function applyLookup(iic, res) {
     }
   }
   db.update(iic, patch);
+  if (res.status === 'ok') sharePrices(iic);
 }
 
 async function checkReceipt(iic) {
@@ -226,7 +228,8 @@ function renderHome() {
     <div class="total">
       <p class="kicker">${esc(t('home.total', { month: monthName(viewMonth, 'monthIn') }))}${isCurrent ? ' ' + esc(t('home.upto', { day: fmtDay(today).slice(0, 5) })) : ''}</p>
       <p class="hero-num">${bigL(total)}</p>
-      ${rs.length ? `<button class="btn small share-btn" type="button" data-act="share">${icon('share')}<span>${esc(t('share.btn'))}</span></button>` : ''}
+      <div class="row wrap share-row">${rs.length ? `<button class="btn small share-btn" type="button" data-act="share">${icon('share')}<span>${esc(t('share.btn'))}</span></button>` : ''}
+      ${wrapYear() && db.receipts.some(r => r.day.startsWith(wrapYear() + '-')) ? `<button class="btn small share-btn cobalt" type="button" data-act="share-year" data-year="${wrapYear()}">${icon('share')}<span>${esc(t('year.btn', { year: wrapYear() }))}</span></button>` : ''}</div>
     </div>
     <dl class="tally">
       <div><dt>${esc(t('home.k.receipts'))}</dt><dd>${rs.length}</dd></div>
@@ -400,22 +403,12 @@ function cheaperSection() {
 }
 
 // ---------- the month as a story image (1080 × 1920) ----------
-async function monthImage(key) {
-  const rs = monthReceipts(key);
-  const total = sum(rs);
-  const today = todayISO();
-  const isCurrent = key === monthKey(today);
-  const qr = rs.filter(r => !isManual(r));
-  const declared = qr.filter(r => fiscalState(r) === 'ok').length;
-  const by = {};
-  for (const r of rs) by[catOf(r)] = (by[catOf(r)] || 0) + r.total;
-  const [topCat, topV] = Object.entries(by).sort((a, b) => b[1] - a[1])[0] || ['other', 0];
-
+// One 1080 × 1920 story in the receipt look: label row, headline with the accent line in cobalt,
+// a big amount, ruled rows, an optional stamp, and the sign-off. Always light: it's a printed thing.
+async function storyImage({ title, accent, amount, sub, rows, stamp }) {
   const W = 1080, H = 1920, M = 90;
-  // Always the light paper look, whatever the phone's theme: it's a printed thing.
   const PAPER = '#eceae4', INK = '#121211', MUTED = '#6e6c65', LINE = '#cfccc3', COBALT = '#2433ff';
   await Promise.all(['800 100px Archivo', '600 100px Archivo', '400 100px Newsreader'].map(f => document.fonts.load(f).catch(() => {})));
-
   const c = document.createElement('canvas');
   c.width = W; c.height = H;
   const x = c.getContext('2d');
@@ -423,23 +416,19 @@ async function monthImage(key) {
   const plain = (weight, size) => { x.font = `${weight} ${size}px Archivo`; if ('fontStretch' in x) x.fontStretch = 'normal'; };
   const track = px => { if ('letterSpacing' in x) x.letterSpacing = px + 'px'; };
   const rule = (y, color = INK, w = 2) => { x.fillStyle = color; x.fillRect(M, y, W - 2 * M, w); };
+  const fit = (text, weight, size, max) => { cond(weight, size); while (x.measureText(text).width > max && size > 40) { size -= 6; cond(weight, size); } return size; };
 
   x.fillStyle = PAPER; x.fillRect(0, 0, W, H);
   x.textBaseline = 'alphabetic';
-
-  // label row
   plain(700, 30); track(5); x.fillStyle = MUTED;
   x.fillText('KUPON', M, 150);
   x.textAlign = 'right'; x.fillText('NOVARIS LABS', W - M, 150); x.textAlign = 'left';
   rule(186);
 
-  // headline: "TETORI IM" / the year in cobalt
-  track(0); cond(800, 190); x.fillStyle = INK;
-  x.fillText(t('share.title', { month: t('monthDef')[+key.slice(5, 7) - 1] }).toUpperCase(), M - 6, 390);
-  x.fillStyle = COBALT; x.fillText(key.slice(0, 4), M - 6, 560);
+  track(0); x.fillStyle = INK;
+  fit(title, 800, 190, W - 2 * M); x.fillText(title, M - 6, 390);
+  x.fillStyle = COBALT; fit(accent, 800, 190, W - 2 * M); x.fillText(accent, M - 6, 560);
 
-  // the total, as big as fits
-  const amount = fmtL(total).slice(0, -2);
   let size = 330;
   cond(800, size);
   while (x.measureText(amount).width > W - 2 * M - 120 && size > 120) { size -= 10; cond(800, size); }
@@ -448,25 +437,20 @@ async function monthImage(key) {
   const aw = x.measureText(amount).width;
   cond(800, Math.round(size * 0.4)); x.fillText('L', M + aw + 10, 930);
   plain(500, 38); x.fillStyle = MUTED;
-  x.fillText(t('share.spent') + (isCurrent ? ' ' + t('share.upto', { day: fmtDay(today).slice(0, 5) }) : ''), M, 1000);
+  x.fillText(sub, M, 1000);
 
-  // three ruled rows, like the bottom of a receipt
-  const rows = [
-    [t('share.receipts'), String(rs.length)],
-    [t('share.declared'), qr.length ? `${declared}/${qr.length}` : '–'],
-    [t('share.top'), `${t('cat.' + topCat)} ${total ? Math.round((topV / total) * 100) : 0}%`],
-  ];
-  let y = 1090;
+  const rowH = rows.length > 3 ? 104 : 128;
+  let y = 1070;
   rule(y);
   for (const [k, v] of rows) {
-    plain(600, 40); x.fillStyle = INK; x.textAlign = 'left'; x.fillText(k, M, y + 82);
-    cond(800, 64); x.textAlign = 'right'; x.fillText(v, W - M, y + 86); x.textAlign = 'left';
-    y += 128; rule(y, LINE, 2);
+    plain(600, 38); x.fillStyle = INK; x.textAlign = 'left'; x.fillText(k, M, y + rowH * 0.62);
+    x.textAlign = 'right'; fit(v, 800, 60, W - 2 * M - x.measureText(k).width - 40);
+    x.fillText(v, W - M, y + rowH * 0.66); x.textAlign = 'left';
+    y += rowH; rule(y, LINE, 2);
   }
 
-  // the stamp
-  if (qr.length && declared) {
-    const word = t('stamp.ok').toUpperCase();
+  if (stamp) {
+    const word = stamp.toUpperCase();
     cond(900, 92); track(4);
     const half = Math.ceil(x.measureText(word).width / 2) + 36;
     x.save();
@@ -480,21 +464,86 @@ async function monthImage(key) {
     x.restore(); track(0); x.textAlign = 'left';
   }
 
-  // sign-off
   rule(H - 230);
   x.font = 'italic 400 44px Newsreader'; if ('fontStretch' in x) x.fontStretch = 'normal';
   x.fillStyle = MUTED; x.fillText(t('share.foot'), M, H - 150);
   cond(800, 64); x.fillStyle = INK; x.fillText('KUPON.NOVARIS.AL', M, H - 80);
-
   return new Promise(res => c.toBlob(res, 'image/png'));
 }
 
-async function shareMonth(btn) {
+function topBy(rs, keyOf) {
+  const m = {};
+  for (const r of rs) m[keyOf(r)] = (m[keyOf(r)] || 0) + r.total;
+  return Object.entries(m).sort((a, b) => b[1] - a[1])[0] || [null, 0];
+}
+
+function monthImage(key) {
+  const rs = monthReceipts(key);
+  const total = sum(rs);
+  const today = todayISO();
+  const qr = rs.filter(r => !isManual(r));
+  const declared = qr.filter(r => fiscalState(r) === 'ok').length;
+  const [topCat, topV] = topBy(rs, catOf);
+  return storyImage({
+    title: t('share.title', { month: t('monthDef')[+key.slice(5, 7) - 1] }).toUpperCase(),
+    accent: key.slice(0, 4),
+    amount: fmtL(total).slice(0, -2),
+    sub: t('share.spent') + (key === monthKey(today) ? ' ' + t('share.upto', { day: fmtDay(today).slice(0, 5) }) : ''),
+    rows: [
+      [t('share.receipts'), String(rs.length)],
+      [t('share.declared'), qr.length ? `${declared}/${qr.length}` : '–'],
+      [t('share.top'), `${t('cat.' + (topCat || 'other'))} ${total ? Math.round((topV / total) * 100) : 0}%`],
+    ],
+    stamp: qr.length && declared ? t('stamp.ok') : '',
+  });
+}
+
+// The year at a glance: for December and January, when everyone posts theirs.
+function yearStats(year) {
+  const rs = db.receipts.filter(r => r.day.startsWith(year + '-'));
+  const total = sum(rs);
+  const qr = rs.filter(r => !isManual(r));
+  const declared = qr.filter(r => fiscalState(r) === 'ok').length;
+  const visits = {};
+  for (const r of rs) { const k = storeKey(r); visits[k] = visits[k] || { label: storeLabel(r), n: 0 }; visits[k].n++; }
+  const shop = Object.values(visits).sort((a, b) => b.n - a.n)[0];
+  const [topCat, topV] = topBy(rs, catOf);
+  const [topMonth] = topBy(rs, r => monthKey(r.day));
+  let rise = null;
+  for (const p of priceIndex()) {
+    const ys = p.buys.filter(b => b.day.startsWith(year + '-'));
+    if (ys.length < 2 || !(ys[0].price > 0)) continue;
+    const pct = Math.round(((ys[ys.length - 1].price - ys[0].price) / ys[0].price) * 100);
+    if (pct >= 3 && (!rise || pct > rise.pct)) rise = { pct, name: p.name };
+  }
+  return { rs, total, qr, declared, shop, topCat, topV, topMonth, rise };
+}
+
+function yearImage(year) {
+  const s = yearStats(year);
+  const rows = [
+    [t('share.receipts'), String(s.rs.length)],
+    [t('share.declared'), s.qr.length ? `${s.declared}/${s.qr.length}` : '–'],
+  ];
+  if (s.shop) rows.push([t('year.shop'), `${s.shop.label} · ${s.shop.n}×`]);
+  if (s.topCat) rows.push([t('share.top'), `${t('cat.' + s.topCat)} ${s.total ? Math.round((s.topV / s.total) * 100) : 0}%`]);
+  if (s.rise) rows.push([t('year.rise'), `${s.rise.name} ${pctStr(s.rise.pct)}`]);
+  else if (s.topMonth) rows.push([t('year.month'), monthName(s.topMonth)]);
+  return storyImage({
+    title: t('year.title').toUpperCase(),
+    accent: String(year),
+    amount: fmtL(s.total).slice(0, -2),
+    sub: t('year.sub', { year }),
+    rows: rows.slice(0, 5),
+    stamp: '',
+  });
+}
+
+async function shareImage(btn, makeBlob, name) {
   btn.disabled = true;
   try {
-    const blob = await monthImage(viewMonth);
+    const blob = await makeBlob();
     if (!blob) throw new Error('no image');
-    const name = `kupon-${viewMonth}.png`;
     const file = new File([blob], name, { type: 'image/png' });
     if (navigator.canShare && navigator.canShare({ files: [file] })) {
       try { await navigator.share({ files: [file] }); } catch (err) { if (err.name !== 'AbortError') throw err; }
@@ -508,6 +557,8 @@ async function shareMonth(btn) {
     btn.disabled = false;
   }
 }
+// December and January: the year in review is offered on the overview.
+const wrapYear = () => { const m = +todayISO().slice(5, 7); const y = +todayISO().slice(0, 4); return m === 12 ? y : m === 1 ? y - 1 : null; };
 
 function budgetSection(rs) {
   const budgets = db.pref('budgets') || {};
@@ -1190,6 +1241,7 @@ function renderList() {
       <div class="seg" role="tablist">
         <label><input type="radio" name="ltab" value="receipts"><span>${icon('receipt')} ${esc(t('list.tab.receipts'))}</span></label>
         <label><input type="radio" name="ltab" value="prices"><span>${icon('tag')} ${esc(t('list.tab.prices'))}</span></label>
+        <label><input type="radio" name="ltab" value="shop"><span>${icon('wallet')} ${esc(t('list.tab.shop'))}</span></label>
       </div>
       <input type="search" id="list-q" autocomplete="off">
       <div class="chips cats" id="list-cats"></div>
@@ -1199,6 +1251,7 @@ function renderList() {
   }
   $$('input[name=ltab]').forEach(i => { i.checked = i.value === listTab; });
   const q = $('#list-q');
+  q.hidden = listTab === 'shop';
   q.value = query;
   q.placeholder = t(listTab === 'prices' ? 'p.search' : 'list.search');
   q.setAttribute('aria-label', q.placeholder);
@@ -1208,6 +1261,7 @@ function renderList() {
 function renderListBody() {
   const chips = $('#list-cats');
   if (listTab === 'prices') { chips.hidden = true; renderPrices(); return; }
+  if (listTab === 'shop') { chips.hidden = true; renderShopping(); return; }
   const body = $('#list-body');
   const present = CATEGORIES.filter(c => db.receipts.some(r => catOf(r) === c));
   if (listCat && !present.includes(listCat)) listCat = '';
@@ -1275,7 +1329,91 @@ function priceIndex() {
   return [...map.values()];
 }
 
+// ---------- shopping list ----------
+// Each line is matched to things you've bought before, to show the price you'd pay and where it was cheapest.
+const shopping = () => db.pref('shopping') || [];
+const saveShopping = list => db.setPref('shopping', list);
+
+function matchProduct(name, index) {
+  const key = productKey(name);
+  const exact = index.find(p => p.key === key);
+  if (exact) return exact;
+  const words = key.split(' ').filter(w => w.length > 1);
+  if (!words.length) return null;
+  // every word of the list line appears in the product name; the most-bought wins
+  const hits = index.filter(p => words.every(w => p.key.includes(w)));
+  return hits.sort((a, b) => b.buys.length - a.buys.length)[0] || null;
+}
+
+function renderShopping() {
+  const body = $('#list-body');
+  const list = shopping();
+  const index = priceIndex();
+  const names = index.map(p => p.name);
+  const rows = list.map(it => ({ it, p: matchProduct(it.name, index), c: ((communityCache.get(productKey(it.name)) || {}).rows || [])[0] }));
+  // Ask the server once for prices of lines we haven't looked up yet, then draw again.
+  const missing = list.filter(it => !it.done && !communityCache.has(productKey(it.name))).map(it => it.name);
+  if (apiUp && missing.length) communityLookup(missing).then(() => { if (listTab === 'shop' && view === 'list') renderShopping(); });
+  const open = rows.filter(r => !r.it.done);
+  // Estimate: each open line at its cheapest known price; count which shop is cheapest most often.
+  let est = 0, priced = 0;
+  const bestAt = {};
+  for (const { it, p, c } of open) {
+    const own = p && p.cheapest;
+    const best = own && (!c || own.price <= c.price) ? { price: own.price, store: own.store } : c ? { price: c.price, store: c.store } : null;
+    if (!best) continue;
+    est += best.price * (it.qty || 1); priced++;
+    bestAt[best.store] = (bestAt[best.store] || 0) + 1;
+  }
+  const topStore = Object.entries(bestAt).sort((a, b) => b[1] - a[1])[0];
+  body.innerHTML = `
+    <form id="sh-form" class="row sh-add">
+      <input id="sh-in" list="sh-names" autocomplete="off" maxlength="60" placeholder="${esc(t('sh.ph'))}" aria-label="${esc(t('sh.ph'))}">
+      <datalist id="sh-names">${names.slice(0, 300).map(n => `<option value="${esc(n)}">`).join('')}</datalist>
+      <button class="btn primary" type="submit" aria-label="${esc(t('sh.add'))}">${icon('add')}</button>
+    </form>
+    ${open.length ? `<div class="sh-sum">
+      <p><span class="kicker">${esc(t('sh.est'))}</span><b>${priced ? '≈' + esc(fmtL(Math.round(est))) : '–'}</b></p>
+      <p class="muted small">${esc(priced < open.length ? t('sh.known', { n: priced, m: open.length }) : t('sh.allKnown'))}${topStore && topStore[1] > 1 ? ' ' + esc(t('sh.where', { store: topStore[0], n: topStore[1] })) : ''}</p>
+    </div>` : ''}
+    ${list.length ? `<ul class="sh-list">${rows.map(({ it, p, c }) => `
+      <li class="${it.done ? 'done' : ''}">
+        <label class="sh-check"><input type="checkbox" data-sh-done="${esc(it.id)}" ${it.done ? 'checked' : ''}><span class="sr">${esc(t('sh.done'))}</span></label>
+        <span class="sh-main"><span class="sh-name">${esc(it.name)}</span>
+          <span class="muted small">${p ? esc(p.cheapest && p.cheapest.skey !== p.last.skey && p.cheapest.price < p.last.price
+            ? t('sh.cheaper', { price: fmtL(p.cheapest.price), store: p.cheapest.store, last: fmtL(p.last.price) })
+            : t('sh.last', { price: fmtL(p.last.price), store: p.last.store })) : c ? '' : esc(t('sh.unknown'))}</span>
+          ${c && (!p || c.price < (p.cheapest || p.last).price) ? `<span class="small good">${esc(t('sh.others', { price: fmtL(c.price), store: c.store }))}</span>` : ''}</span>
+        <span class="sh-qty"><button type="button" data-sh-q="${esc(it.id)}" data-d="-1" aria-label="−">−</button><b>${it.qty || 1}</b><button type="button" data-sh-q="${esc(it.id)}" data-d="1" aria-label="+">+</button></span>
+      </li>`).join('')}</ul>
+      ${list.some(i => i.done) ? `<p><button class="btn link" type="button" data-act="sh-clear">${esc(t('sh.clear'))}</button></p>` : ''}`
+      : `<p class="muted pad">${esc(t('sh.empty'))}</p>`}`;
+  $('#sh-form').addEventListener('submit', e => {
+    e.preventDefault();
+    const v = $('#sh-in').value.replace(/\s+/g, ' ').trim();
+    if (!v) return;
+    const cur = shopping();
+    const same = cur.find(i => productKey(i.name) === productKey(v) && !i.done);
+    if (same) same.qty = (same.qty || 1) + 1;
+    else cur.push({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 5), name: v, qty: 1, done: false });
+    saveShopping(cur);
+    renderShopping();
+    $('#sh-in').focus();
+  });
+}
+
+let communityTimer;
 function renderPrices() {
+  clearTimeout(communityTimer);
+  if (apiUp && query.trim().length >= 3) {
+    const q0 = query;
+    communityTimer = setTimeout(async () => {
+      const rows = await communityPrices(q0);
+      const box = $('#p-everyone');
+      if (!box || query !== q0) return;
+      box.innerHTML = rows.length ? `<h2>${esc(t('cp.others'))}</h2>${offerRows(rows.slice(0, 12))}<p class="muted small">${esc(t('cp.source'))}</p>` : '';
+    }, 450);
+  }
   const body = $('#list-body');
   const q = query.trim().toLowerCase();
   const all = priceIndex().sort((a, b) => (b.last.day + b.last.time).localeCompare(a.last.day + a.last.time));
@@ -1290,7 +1428,7 @@ function renderPrices() {
       ${cheaperElsewhere ? `<span class="small good">${icon('arrow_trending_down', 'tiny')} ${esc(t('p.cheapest', { price: fmtL(p.cheapest.price), store: p.cheapest.store }))}</span>` : ''}</span>
       <span class="ramt small">${p.change != null && p.change !== 0 ? `<span class="${p.change > 0 ? 'warn' : 'good'}">${esc(pctStr(p.change))}</span><br>` : ''}<span class="muted">${esc(t('p.times', { n: p.buys.length }))}</span></span>
     </button></li>`;
-  }).join('')}</ul>` : `<p class="muted pad">${esc(t('list.noMatch'))}</p>`);
+  }).join('')}</ul>` : `<p class="muted pad">${esc(t('list.noMatch'))}</p>`) + '<div id="p-everyone"></div>';
 }
 
 function openProduct(key) {
@@ -1303,11 +1441,21 @@ function openProduct(key) {
       <h3>${esc(t('th.store'))}</h3>
       <table class="tbl"><tbody>${p.byStore.map((b, i) => `<tr><td>${esc(b.store)}<span class="muted small block">${fmtDay(b.day)}</span></td>
         <td class="num ${i === 0 ? 'good' : ''}">${fmtL(b.price)}</td></tr>`).join('')}</tbody></table>` : ''}
+    <div id="p-community"></div>
     <h3>${esc(t('p.history'))}</h3>
     <table class="tbl"><thead><tr><th>${esc(t('th.date'))}</th><th>${esc(t('th.store'))}</th><th class="num">${esc(t('th.price'))}</th></tr></thead>
       <tbody>${p.buys.slice().reverse().map(b => `<tr><td class="small">${fmtDay(b.day)}</td><td class="small">${esc(b.store)}</td><td class="num">${fmtL(b.price)}</td></tr>`).join('')}</tbody></table>
     <div class="row end"><button class="btn primary" type="button" id="p-close">${esc(t('r.close'))}</button></div>`,
-  () => $('#p-close').addEventListener('click', closeSheet));
+  () => {
+    $('#p-close').addEventListener('click', closeSheet);
+    if (!apiUp) return;
+    const box = $('#p-community');
+    box.innerHTML = `<h3>${esc(t('cp.others'))}</h3><p class="fstate muted"><span class="spin" aria-hidden="true"></span><span>${esc(t('cp.loading'))}</span></p>`;
+    communityPrices(p.name).then(rows => {
+      if (!box.isConnected) return;
+      box.innerHTML = `<h3>${esc(t('cp.others'))}</h3>` + (rows.length ? offerRows(rows.slice(0, 8)) + `<p class="muted small">${esc(t('cp.source'))}</p>` : `<p class="muted small">${esc(t('cp.none'))}</p>`);
+    });
+  });
 }
 
 // ---------- Kupon's server: features that need it appear only when it answers ----------
@@ -1321,6 +1469,114 @@ async function checkApi() {
     apiUp = res.ok;
   } catch (e) { apiUp = false; }
   if (apiUp && !sheet().open) render();
+}
+
+// ---------- shared prices (opt-in to give; anyone can look) ----------
+// Giving sends only the receipt's code, NIPT and time: the server reads the items from the portal itself.
+async function sharePrices(iic) {
+  const r = db.find(iic);
+  if (!r || !apiUp || db.demo || !db.pref('sharePrices') || r.shared || isManual(r)) return false;
+  try {
+    const res = await fetch(API_BASE + '/v1/prices/contribute', { method: 'POST', credentials: 'omit', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ iic: r.iic, tin: r.tin, crtd: r.crtd }) });
+    const j = await res.json().catch(() => ({}));
+    if (res.ok && !j.error) { db.update(iic, { shared: true }); return true; }
+  } catch (e) {}
+  return false;
+}
+
+async function shareOlder(btn) {
+  const todo = db.receipts.filter(r => !isManual(r) && fiscalState(r) === 'ok' && !r.shared).slice(0, 150);
+  btn.disabled = true;
+  let n = 0;
+  for (let i = 0; i < todo.length; i++) {
+    const s = btn.querySelector('span'); if (s) s.textContent = t('cp.sharing', { i: i + 1, n: todo.length });
+    if (await sharePrices(todo[i].iic)) n++;
+    await sleep(500);
+  }
+  toast(t('cp.shared', { n }));
+  render();
+}
+
+// Answers are kept for a few minutes so lists and sheets don't ask twice.
+const communityCache = new Map();
+async function communityPrices(q) {
+  const key = productKey(q);
+  const hit = communityCache.get(key);
+  if (hit && Date.now() - hit.at < 5 * 60000) return hit.rows;
+  if (!apiUp) return [];
+  try {
+    const res = await fetch(API_BASE + '/v1/prices?q=' + encodeURIComponent(q), { credentials: 'omit' });
+    const rows = res.ok ? (await res.json()).results || [] : [];
+    communityCache.set(key, { at: Date.now(), rows });
+    return rows;
+  } catch (e) { return []; }
+}
+async function communityLookup(names) {
+  const need = names.filter(n => { const h = communityCache.get(productKey(n)); return !h || Date.now() - h.at > 5 * 60000; });
+  if (need.length && apiUp) {
+    try {
+      const res = await fetch(API_BASE + '/v1/prices/lookup', { method: 'POST', credentials: 'omit', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ names: need.slice(0, 25) }) });
+      if (res.ok) { const { results } = await res.json(); for (const [n, rows] of Object.entries(results || {})) communityCache.set(productKey(n), { at: Date.now(), rows }); }
+    } catch (e) {}
+  }
+  return Object.fromEntries(names.map(n => [n, (communityCache.get(productKey(n)) || {}).rows || []]));
+}
+const offerRows = rows => `<ul class="rows">${rows.map(o => `<li><span class="rk">${esc(fmtDay(o.day).slice(0, 5))}</span>
+  <span class="rl">${esc(o.store)}${o.town ? `<span class="muted small"> · ${esc(o.town)}</span>` : ''}<span class="muted small block">${esc(o.name)}</span></span>
+  <span class="rv">${fmtL(o.price)}</span></li>`).join('')}</ul>`;
+
+function sharePricesSection() {
+  if (!apiUp || db.demo) return '';
+  const on = !!db.pref('sharePrices');
+  const older = on ? db.receipts.filter(r => !isManual(r) && fiscalState(r) === 'ok' && !r.shared).length : 0;
+  return `<h2>${esc(t('cp.title'))}</h2>
+    <label class="check"><input type="checkbox" data-act="cp-toggle" ${on ? 'checked' : ''}> <span>${esc(t('cp.toggle'))}</span></label>
+    <p class="muted small">${esc(t('cp.privacy'))}</p>
+    ${older ? `<p><button class="btn small" type="button" data-act="cp-older">${icon('arrow_upload')}<span>${esc(t('cp.older', { n: older }))}</span></button></p>` : ''}`;
+}
+
+// ---------- reminders ----------
+const addDays = (day, n) => { const [y, m, d] = day.split('-').map(Number); const x = new Date(y, m - 1, d + n); return `${x.getFullYear()}-${pad(x.getMonth() + 1)}-${pad(x.getDate())}`; };
+
+// Everything the phone may want to say on a given morning. Texts stay here; dates go to the server.
+function buildReminders() {
+  const today = todayISO(), out = [];
+  for (const w of warrantyRows()) {
+    for (const before of [30, 7]) {
+      const date = addDays(w.until, -before);
+      if (date > today) out.push({ id: `w-${w.r.iic}-${before}`, date, url: '#warranty', title: t('rm.wTitle', { n: before }),
+        body: t('rm.wBody', { item: (w.r.warranty && w.r.warranty.item) || storeLabel(w.r), store: storeLabel(w.r), date: fmtDay(w.until) }) });
+    }
+  }
+  for (const r of db.receipts) {
+    if (isManual(r) || fiscalState(r) === 'ok' || dayDiff(r.day, today) > 7) continue;
+    const date = addDays(r.day, 2) > today ? addDays(r.day, 2) : addDays(today, 1);
+    out.push({ id: `p-${r.iic}`, date, url: '#list', title: t('rm.pTitle'), body: t('rm.pBody', { store: storeLabel(r), amount: fmtL(r.total), date: fmtDay(r.day) }) });
+  }
+  const key = monthKey(today), next = shiftMonth(key, 1);
+  out.push({ id: `m-${key}`, date: `${next}-01`, url: '#home', title: t('rm.mTitle', { month: t('monthDef')[+key.slice(5, 7) - 1] }), body: t('rm.mBody') });
+  return out.sort((a, b) => a.date.localeCompare(b.date)).slice(0, 60);
+}
+
+function remindSection() {
+  if (!apiUp || db.demo || !pushSupported()) return '';
+  const on = !!db.pref('remind');
+  const next = on ? buildReminders()[0] : null;
+  return `<h2>${esc(t('rm.title'))}</h2>
+    ${needsInstall() && !on ? `<p class="small">${esc(t('rm.ios'))}</p>` : `
+    <label class="check"><input type="checkbox" data-act="rm-toggle" ${on ? 'checked' : ''}> <span>${esc(t('rm.toggle'))}</span></label>
+    <p class="muted small">${esc(t('rm.what'))}</p>
+    ${next ? `<p class="small">${icon('calendar_add', 'tiny')} ${esc(t('rm.next', { date: fmtDay(next.date), title: next.title }))}</p>` : ''}`}`;
+}
+
+async function toggleReminders(input) {
+  input.disabled = true;
+  if (db.pref('remind')) { await disableReminders(); toast(t('rm.off')); }
+  else {
+    const r = await enableReminders(buildReminders, getLang());
+    toast(r.ok ? t('rm.on') : t('rm.err.' + (r.error === 'denied' ? 'denied' : 'network')));
+  }
+  render();
 }
 
 // ---------- sync between phones ----------
@@ -1575,12 +1831,15 @@ function renderData() {
       <input type="file" id="import-input" accept=".json,.csv,application/json,text/csv" hidden>
     </div>`}
     ${syncSection()}
+    ${remindSection()}
+    ${sharePricesSection()}
     ${coachSection()}
     ${(db.pref('recurring') || []).length ? `<h2>${esc(t('rec.title'))}</h2>
       <p class="muted small">${esc(t('rec.hint'))}</p>
       <ul class="rlist">${db.pref('recurring').map(r => `<li><div class="rec-row"><span class="rmain"><span class="rname">${esc(r.name)}</span>
         <span class="muted small">${esc(t('cat.' + r.cat))} · ${esc(t('rec.day', { day: r.dom }))}</span></span>
         <span class="ramt">${fmtL(r.amount)}</span><button class="btn small" type="button" data-act="rec-stop" data-id="${esc(r.id)}">${esc(t('rec.stop'))}</button></div></li>`).join('')}</ul>` : ''}
+    ${db.receipts.length ? `<h2>${esc(t('year.title'))}</h2><p><button class="btn" type="button" data-act="share-year" data-year="${wrapYear() || todayISO().slice(0, 4)}">${icon('share')}<span>${esc(t('year.btn', { year: wrapYear() || todayISO().slice(0, 4) }))}</span></button></p>` : ''}
     <h2>${esc(t('lim.title'))}</h2>
     <p><button class="btn" type="button" data-act="limit">${db.pref('limit') > 0 ? esc(fmtL(db.pref('limit')) + ' · ' + t('lim.edit')) : esc(t('lim.set'))}</button></p>
     <h2>${esc(t('d.budgets'))}</h2>
@@ -1817,6 +2076,17 @@ function sampleData() {
 
 // ---------- wiring ----------
 document.addEventListener('click', e => {
+  const sh = e.target.closest('[data-sh-q], [data-sh-done]');
+  if (sh) {
+    const list = shopping();
+    const it = list.find(i => i.id === (sh.dataset.shQ || sh.dataset.shDone));
+    if (!it) return;
+    if (sh.dataset.shQ) { it.qty = Math.max(0, (it.qty || 1) + +sh.dataset.d); if (!it.qty) list.splice(list.indexOf(it), 1); }
+    else it.done = sh.checked;
+    saveShopping(list);
+    renderShopping();
+    return;
+  }
   const a = e.target.closest('[data-act], [data-open], [data-ics], [data-check], [data-product], [data-cat], [data-store], [data-lcat], .tabbar a');
   if (!a) return;
   if (a.dataset.cat) { listTab = 'receipts'; listCat = a.dataset.cat; query = ''; go('list'); return; }
@@ -1831,17 +2101,22 @@ document.addEventListener('click', e => {
   else if (act === 'demo') { db.startDemo(sampleData()); viewMonth = monthKey(todayISO()); go('home'); }
   else if (act === 'exit-demo') { db.endDemo(); viewMonth = monthKey(todayISO()); render(); }
   else if (act === 'manual') openManual();
-  else if (act === 'share') shareMonth(a);
+  else if (act === 'share') shareImage(a, () => monthImage(viewMonth), `kupon-${viewMonth}.png`);
+  else if (act === 'share-year') { const y = +a.dataset.year; shareImage(a, () => yearImage(y), `kupon-viti-${y}.png`); }
   else if (act === 'prices') { listTab = 'prices'; query = ''; go('list'); }
   else if (act === 'csv') exportCSV();
   else if (act === 'json') { download(`kupon-${todayISO()}.json`, db.exportJSON(), 'application/json'); if (!db.demo) { db.setPref('lastExport', new Date().toISOString()); render(); } }
   else if (act === 'limit') openLimit();
+  else if (act === 'sh-clear') { saveShopping(shopping().filter(i => !i.done)); renderShopping(); }
   else if (act === 'sync-on') turnSyncOn(a);
   else if (act === 'sync-join') openJoin();
   else if (act === 'sync-code') openSyncCode();
   else if (act === 'sync-now') { a.disabled = true; syncNow().then(r => { toast(r.ok ? t('sy.done') : t('sy.err.' + (r.error && r.error.startsWith('http') ? 'network' : r.error || 'network'))); render(); }); }
   else if (act === 'sync-off') { if (!a.dataset.armed) { a.dataset.armed = '1'; a.querySelector('span').textContent = t('sy.offConfirm'); return; } disableSync(); render(); }
   else if (act === 'coach') openCoach();
+  else if (act === 'rm-toggle') toggleReminders(a);
+  else if (act === 'cp-toggle') { db.setPref('sharePrices', !db.pref('sharePrices')); render(); }
+  else if (act === 'cp-older') shareOlder(a);
   else if (act === 'coach-toggle') { db.setPref('coach', !db.pref('coach')); render(); }
   else if (act === 'rec-stop') { db.setPref('recurring', (db.pref('recurring') || []).filter(r => r.id !== a.dataset.id)); render(); }
   else if (act === 'later') { db.setPref(a.dataset.k, new Date().toISOString()); render(); }
@@ -1874,13 +2149,18 @@ setLang(db.pref('lang') || 'sq');
 applyStatic();
 // Right after an update the browser may still hold an older i18n.js from before it. Fetch the
 // app's files fresh once and reload, rather than show text keys. ('release' must match i18n.js.)
-if (t('release') !== '6' && !sessionStorage.getItem('kupon.refreshed')) {
+if (t('release') !== '7' && !sessionStorage.getItem('kupon.refreshed')) {
   sessionStorage.setItem('kupon.refreshed', '1');
-  Promise.all(['js/i18n.js', 'js/app.js', 'js/store.js', 'js/sync.js', 'js/ocr.js', 'js/config.js', 'js/portal.js', 'js/qr.js', 'js/icons.js', 'css/app.css']
+  Promise.all(['js/i18n.js', 'js/app.js', 'js/store.js', 'js/sync.js', 'js/ocr.js', 'js/config.js', 'js/portal.js', 'js/qr.js', 'js/icons.js', 'js/remind.js', 'css/app.css']
     .map(u => fetch(u, { cache: 'reload' }).catch(() => {}))).finally(() => location.reload());
 }
 applyRecurring();
 startAutoSync(r => { if (r && r.ok && !sheet().open) render(); });
+// Keep reminder texts and dates current whenever receipts or warranties change.
+let remindTimer;
+const refreshReminders = () => { clearTimeout(remindTimer); remindTimer = setTimeout(() => { if (db.pref('remind')) syncReminders(buildReminders, getLang()); }, 3000); };
+db.onChange(refreshReminders);
+refreshReminders();
 checkApi();
 go(location.hash.slice(1) || 'home');
 setTimeout(recheckPending, 1500);

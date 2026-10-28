@@ -178,7 +178,8 @@ label.btn { font-size: .95rem; font-weight: 650; letter-spacing: 0; text-transfo
 .monthbar h1 { margin: 0; font-size: 1.05rem; letter-spacing: .1em; }
 .total { padding: 14px 0 18px; border-bottom: 1px solid var(--rule); }
 .total .kicker { margin: 0; }
-.share-btn { margin-top: 16px; }
+.share-row { margin-top: 16px; gap: 8px; }
+.share-row .share-btn { margin: 0; }
 .hero-num {
   display: block; font-family: var(--cond); font-stretch: 62%; font-weight: 800;
   font-size: clamp(4.2rem, 24vw, 6.2rem); line-height: .92; letter-spacing: -.01em; margin: 8px 0 0;
@@ -520,3 +521,22 @@ fieldset.warranty { border: none; border-top: 1px solid var(--rule); padding: 12
 .ai-answer .ai-q { font-weight: 650; color: var(--muted); font-size: .88rem; }
 .ai-sent { margin-top: 12px; }
 .ai-sent pre { white-space: pre-wrap; font-size: .75rem; background: var(--paper); padding: 8px; border: 1px solid var(--line); }
+
+/* ---------- shopping list ---------- */
+.sh-add { margin: 4px 0 12px; }
+.sh-add .btn { min-width: 52px; padding: 0; }
+.sh-sum { display: flex; flex-direction: column; gap: 2px; padding: 12px 0; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--line); margin-bottom: 4px; }
+.sh-sum p { margin: 0; }
+.sh-sum p:first-child { display: flex; justify-content: space-between; align-items: baseline; }
+.sh-sum b { font-family: var(--cond); font-stretch: 62%; font-weight: 800; font-size: 2rem; line-height: 1; }
+.sh-list { list-style: none; margin: 0; padding: 0; }
+.sh-list li { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.sh-list li.done .sh-name { text-decoration: line-through; color: var(--muted); }
+.sh-check { display: grid; place-items: center; width: 40px; height: 40px; flex: none; margin: -6px 0 -6px -8px; cursor: pointer; text-transform: none; }
+.sh-check input { width: 22px; height: 22px; min-height: 0; accent-color: var(--ink); }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+.sh-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.sh-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sh-qty { display: flex; align-items: center; flex: none; border: 1px solid var(--line); }
+.sh-qty button { width: 36px; height: 36px; border: 0; background: none; font: inherit; font-size: 1.15rem; color: var(--ink); cursor: pointer; touch-action: manipulation; }
+.sh-qty b { min-width: 22px; text-align: center; font-family: var(--cond); font-stretch: 75%; }

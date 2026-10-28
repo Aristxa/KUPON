@@ -32,7 +32,7 @@ export function suggestCategory(name) {
 function empty() { return { v: 1, receipts: [], stores: {}, prefs: {}, deleted: {} }; }
 
 // Prefs that follow the user to another phone through sync; the rest stay on this one.
-export const SYNCED_PREFS = ['limit', 'budgets', 'recurring'];
+export const SYNCED_PREFS = ['limit', 'budgets', 'recurring', 'shopping'];
 const listeners = new Set();
 let quiet = false;
 const now = () => new Date().toISOString();
